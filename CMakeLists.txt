@@ -25,3 +25,12 @@ target_link_libraries(test_event_queue
     PRIVATE
         pmm_core
 )
+
+add_executable(test_order_book
+    tests/test_order_book.cpp
+    src/data/order_book.cpp
+)
+
+target_link_libraries(test_order_book
+    PRIVATE pmm_core
+)

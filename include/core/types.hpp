@@ -5,12 +5,14 @@
 #include <variant>
 #include <chrono>
 
-namespace pmm {  // "Polymarket Market Maker" namespace
+namespace pmm {
 
 using Price = double;
 using Size = double;
 using OrderId = std::string;
 using TokenId = std::string;
+using MarketId = std::string;
+using Volume = double;
 
 enum class Side {
     BUY,
@@ -112,5 +114,12 @@ struct Event {
 
 };
 
+struct Order {
+    OrderId order_id;
+    TokenId token_id;
+    Price price;
+    Size size;
+    Side side;
+};
 
 } // namespace pmm
