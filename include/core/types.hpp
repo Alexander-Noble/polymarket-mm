@@ -20,14 +20,22 @@ enum class Side {
 };
 
 enum class EventType {
-    MARKET_DATA_UPDATE,
+    BOOK_SNAPSHOT,
+    PRICE_LEVEL_UPDATE,
+    TRADE,
     ORDER_FILL,
     ORDER_REJECTED,
     TIMER_TICK,
     SHUTDOWN
 };
 
-struct MarketDataPayload {
+struct BookSnapshotPayload {
+    TokenId token_id;
+    std::vector<std::pair<Price, Size>> bids;
+    std::vector<std::pair<Price, Size>> asks;
+};
+
+struct PriceLevelUpdatePayload {
     TokenId token_id;
     std::vector<std::pair<Price, Size>> bids;
     std::vector<std::pair<Price, Size>> asks;
@@ -58,20 +66,31 @@ struct Event {
     std::chrono::system_clock::time_point timestamp;
 
     std::variant<
-        MarketDataPayload,
+        BookSnapshotPayload,
+        PriceLevelUpdatePayload,
         OrderFillPayload,
         OrderRejectedPayload,
         TimerTickPayload,
         ShutdownPayload
     > payload;
 
-    static Event marketData(TokenId token_id,
-                            std::vector<std::pair<Price, Size>> bids,
-                            std::vector<std::pair<Price, Size>> asks) {
+    static Event bookSnapshot(TokenId token_id,
+                                 std::vector<std::pair<Price, Size>> bids,
+                                 std::vector<std::pair<Price, Size>> asks) {
         return Event{
-            EventType::MARKET_DATA_UPDATE,
+            EventType::BOOK_SNAPSHOT,
             std::chrono::system_clock::now(),
-            MarketDataPayload{std::move(token_id), std::move(bids), std::move(asks)}
+            BookSnapshotPayload{std::move(token_id), std::move(bids), std::move(asks)}
+        };
+    }
+
+    static Event priceLevelUpdate(TokenId token_id,
+                                   std::vector<std::pair<Price, Size>> bids,
+                                   std::vector<std::pair<Price, Size>> asks) {
+        return Event{
+            EventType::PRICE_LEVEL_UPDATE,
+            std::chrono::system_clock::now(),
+            PriceLevelUpdatePayload{std::move(token_id), std::move(bids), std::move(asks)}
         };
     }
 

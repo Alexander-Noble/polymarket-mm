@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(nlohmann_json REQUIRED)
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
@@ -13,7 +14,13 @@ add_library(pmm_core
     src/core/event_queue.cpp
 )
 
-target_link_libraries(pmm_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
+target_link_libraries(pmm_core
+    PUBLIC
+        nlohmann_json::nlohmann_json
+        Threads::Threads
+        OpenSSL::SSL        
+        OpenSSL::Crypto
+)
 
 # Build the test executable
 add_executable(test_event_queue
@@ -32,5 +39,15 @@ add_executable(test_order_book
 )
 
 target_link_libraries(test_order_book
+    PRIVATE pmm_core
+)
+
+
+add_executable(test_websocket
+    tests/test_websocket.cpp
+    src/network/websocket_client.cpp
+)
+
+target_link_libraries(test_websocket
     PRIVATE pmm_core
 )

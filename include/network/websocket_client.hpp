@@ -41,6 +41,10 @@ public:
     void subscribe(const std::vector<std::string>& asset_ids);
     
     void disconnect();
+
+    bool isConnected() const {
+        return running_.load();
+    }
     
 private:
     EventQueue& event_queue_;
@@ -55,13 +59,20 @@ private:
     
     std::vector<std::string> subscribed_assets_;
     
+    // For async operations
+    std::shared_ptr<net::io_context> ioc_;
+
     void run();
     
     void parseUrl(const std::string& url);
 
     void handleMessage(const std::string& message);
 
+    void parseMessage(const nlohmann::json& json_msg);
+
     void parseBookMessage(const nlohmann::json& msg);
+    
+    void parsePriceChangeMessage(const nlohmann::json& msg);
 };
 
 } // namespace pmm
