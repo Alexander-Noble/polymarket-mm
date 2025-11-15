@@ -2,7 +2,6 @@
 
 #include "core/types.hpp"
 #include "core/event_queue.hpp"
-
 #include <boost/beast/core.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/websocket.hpp>
@@ -10,7 +9,6 @@
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/ssl/stream.hpp>
-
 #include <nlohmann/json.hpp>
 
 #include <string>
@@ -19,7 +17,6 @@
 #include <vector>
 
 namespace beast = boost::beast;
-namespace http = beast::http;
 namespace websocket = beast::websocket;
 namespace net = boost::asio;
 namespace ssl = boost::asio::ssl;
@@ -37,10 +34,9 @@ public:
     ~PolymarketWebSocketClient();
     
     void connect();
-    
-    void subscribe(const std::vector<std::string>& asset_ids);
-    
     void disconnect();
+
+    void subscribe(const std::vector<std::string>& asset_ids);
 
     bool isConnected() const {
         return running_.load();
@@ -54,25 +50,26 @@ private:
     std::string port_;
     std::string path_;
     
-    std::atomic<bool> running_;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> connected_{false};
     std::thread ws_thread_;
     
-    std::vector<std::string> subscribed_assets_;
-    
-    // For async operations
     std::shared_ptr<net::io_context> ioc_;
-
+    std::shared_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws_;
+    
+    std::vector<std::string> subscribed_assets_;
+    std::mutex subscription_mutex_;
+    
     void run();
-    
+    void sendSubscription();
     void parseUrl(const std::string& url);
-
     void handleMessage(const std::string& message);
-
     void parseMessage(const nlohmann::json& json_msg);
-
     void parseBookMessage(const nlohmann::json& msg);
-    
     void parsePriceChangeMessage(const nlohmann::json& msg);
+
+    void startAsyncRead(beast::flat_buffer& buffer);
+    void startPingTimer();
 };
 
 } // namespace pmm

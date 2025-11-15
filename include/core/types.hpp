@@ -1,4 +1,4 @@
-#pragma once  // Include guard (modern alternative to #ifndef)
+#pragma once 
 
 #include <string>
 #include <vector>
@@ -9,10 +9,10 @@ namespace pmm {
 
 using Price = double;
 using Size = double;
+using Volume = double;
 using OrderId = std::string;
 using TokenId = std::string;
 using MarketId = std::string;
-using Volume = double;
 
 enum class Side {
     BUY,
@@ -133,12 +133,60 @@ struct Event {
 
 };
 
+enum class OrderStatus {
+    OPEN,
+    FILLED,
+    CANCELLED
+};
+
+
 struct Order {
     OrderId order_id;
     TokenId token_id;
+    Side side;
     Price price;
     Size size;
-    Side side;
+    Size filled_size;
+    OrderStatus status;
+    std::chrono::steady_clock::time_point created_at;
 };
+
+struct MarketMetadata {
+    std::string title;        // e.g., "Aston Villa vs Bournemouth"
+    std::string outcome;      // e.g., "Villa Win", "Draw", "Bournemouth Win"
+    std::string market_id;    // Condition ID
+};
+
+struct MarketInfo {
+    std::string event_title;
+    std::string market_id;
+    std::string condition_id;
+    std::string question;
+    std::string description; 
+    std::vector<TokenId> tokens;
+    std::vector<std::string> outcomes;
+    std::string tags;
+    std::string slug;
+    bool active;
+    double volume;
+    double liquidity;
+    MarketMetadata metadata;
+};
+
+struct EventInfo {
+    std::string event_id;
+    std::string title;
+    std::string slug;
+    std::string description;
+    std::string start_date;
+    std::string end_date;
+    std::string category;
+    bool active;
+    bool closed;
+    double volume;
+    double liquidity;
+    std::vector<MarketInfo> markets;
+};
+
 
 } // namespace pmm
