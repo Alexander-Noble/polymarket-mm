@@ -1,14 +1,16 @@
 #include "strategy/strategy_engine.hpp"
+#include "utils/logger.hpp"
 #include <iostream>
 
 namespace pmm {
 
 StrategyEngine::StrategyEngine(EventQueue& queue, TradingMode mode)
     : event_queue_(queue),
-    trade_logger_(std::make_unique<TradeLogger>("./logs")),
-    order_manager_(queue, mode, trade_logger_.get()),
+    state_persistence_(std::make_unique<StatePersistence>("./state.json")),
+    trading_logger_(std::make_unique<TradingLogger>("./logs")),
+    order_manager_(queue, mode, trading_logger_.get()),
     running_(false) {
-    std::cout << "StrategyEngine initialized\n";
+    LOG_INFO("StrategyEngine initialized");
 }
 
 StrategyEngine::~StrategyEngine() {
@@ -17,13 +19,13 @@ StrategyEngine::~StrategyEngine() {
 
 void StrategyEngine::start() {
     if (running_.load()) {
-        std::cout << "StrategyEngine already running\n";
+        LOG_INFO("StrategyEngine already running");
         return;
     }
     
     running_ = true;
     strategy_thread_ = std::thread(&StrategyEngine::run, this);
-    std::cout << "StrategyEngine started\n";
+    LOG_INFO("StrategyEngine started");
 }
 
 void StrategyEngine::stop() {
@@ -31,28 +33,26 @@ void StrategyEngine::stop() {
         return;
     }
     
-    std::cout << "Stopping StrategyEngine...\n";
+    LOG_DEBUG("Stopping StrategyEngine...");
     running_.store(false);
     
-    // Push a shutdown event to unblock the queue
     event_queue_.push(Event::shutdown("Strategy shutdown"));
     
     if (strategy_thread_.joinable()) {
         strategy_thread_.join();
     }
     
-    std::cout << "StrategyEngine stopped\n";
+    LOG_INFO("StrategyEngine stopped");
 }
 
 void StrategyEngine::run() {
-    std::cout << "StrategyEngine event loop started\n";
+    LOG_DEBUG("StrategyEngine event loop started");
     
     auto last_snapshot = std::chrono::steady_clock::now();
 
     while (running_.load()) {
         Event event = event_queue_.pop();
-        
-        // Route to appropriate handler
+  
         switch (event.type) {
             case EventType::BOOK_SNAPSHOT:
                 handleBookSnapshot(event);
@@ -71,12 +71,12 @@ void StrategyEngine::run() {
                 break;
                 
             case EventType::SHUTDOWN:
-                std::cout << "Received shutdown event\n";
+                LOG_DEBUG("Received shutdown event");
                 running_.store(false);
                 break;
                 
             default:
-                std::cout << "Unknown event type\n";
+                LOG_WARN("Unknown event type");
                 break;
         }
 
@@ -87,7 +87,7 @@ void StrategyEngine::run() {
         }
     }
     
-    std::cout << "StrategyEngine event loop exited\n";
+    LOG_INFO("StrategyEngine event loop exited");
 }
 
 void StrategyEngine::handleBookSnapshot(const Event& event) {
@@ -98,9 +98,8 @@ void StrategyEngine::handleBookSnapshot(const Event& event) {
     if (it != market_metadata_.end()) {
         market_name = it->second.title + " - " + it->second.outcome;
     }
-    std::cout << "Processing book snapshot for " << market_name << "\n";
-    std::cout << "       Bids: " << payload.bids.size() 
-              << " levels | Asks: " << payload.asks.size() << " levels\n";
+    LOG_INFO("Processing book snapshot for {}", market_name);
+    LOG_INFO("       Bids: {} levels | Asks: {} levels", payload.bids.size(), payload.asks.size());
         
     OrderBook& book = getOrCreateOrderBook(payload.token_id, market_name);
     book.clear();
@@ -112,10 +111,10 @@ void StrategyEngine::handleBookSnapshot(const Event& event) {
         book.updateAsk(price, size);
     }
     
-    std::cout << "Order book updated: " << market_name
-              << " - Best bid: " << book.getBestBid()
-              << ", Best ask: " << book.getBestAsk()
-              << ", Spread: " << book.getSpread() << "\n";
+    LOG_DEBUG("Order book updated: {} - Best bid: {}, Best ask: {}, Spread: {}", market_name,
+              book.getBestBid(),
+              book.getBestAsk(),
+              book.getSpread());
     
     
     order_manager_.updateOrderBook(payload.token_id, book);
@@ -128,9 +127,8 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
     auto market_name = market_metadata_.find(token_id) != market_metadata_.end() ?
                        market_metadata_[token_id].title + " - " + market_metadata_[token_id].outcome :
                        token_id;
-    std::cout << "Processing price update for " << market_name << "\n";
-    std::cout << "       Bids: " << payload.bids.size() 
-              << " levels | Asks: " << payload.asks.size() << " levels\n";
+    LOG_INFO("Processing price update for {}", market_name);
+    LOG_INFO("       Bids: {} levels | Asks: {} levels", payload.bids.size(), payload.asks.size());
 
     OrderBook& book = getOrCreateOrderBook(token_id, market_name);
     
@@ -141,9 +139,9 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
         book.updateAsk(price, size);
     }
     
-    std::cout << "Price levels updated: " << market_name
-              << " - Best bid: " << book.getBestBid()
-              << ", Best ask: " << book.getBestAsk() << "\n";
+    LOG_DEBUG("Price levels updated: {} - Best bid: {}, Best ask: {}", market_name,
+              book.getBestBid(),
+              book.getBestAsk());
 
     calculateQuotes(token_id, market_name);
 }
@@ -154,19 +152,17 @@ void StrategyEngine::handleOrderFill(const Event& event) {
                     market_metadata_[payload.token_id].title + " - " + market_metadata_[payload.token_id].outcome :
                     payload.token_id;
     
-    std::cout << "\n>>> FILL EVENT: " << payload.order_id << "\n";
-    std::cout << "    Market: " << market_name << "\n";
-    std::cout << "    Side: " << (payload.side == Side::BUY ? "BUY" : "SELL") << "\n";
-    std::cout << "    Size: " << payload.filled_size << " @ " << payload.fill_price << "\n";
-    
+    LOG_INFO(">>> FILL EVENT: {}", payload.order_id);
+    LOG_INFO("    Market: {}", market_name);
+    LOG_INFO("    Side: {}", (payload.side == Side::BUY ? "BUY" : "SELL"));
+    LOG_INFO("    Size: {} @ {}", payload.filled_size, payload.fill_price);
+
     updatePosition(payload.token_id, payload.filled_size, payload.fill_price, payload.side);
     
     {
         std::lock_guard<std::mutex> lock(positions_mutex_);
         auto& pos = positions_[payload.token_id];
-        std::cout << "    New position: " << pos.quantity 
-                  << " @ avg " << pos.avg_entry_price 
-                  << " | Realized PnL: $" << pos.realized_pnl << "\n";
+        LOG_INFO("    New position: {} @ avg {} | Realized PnL: ${}", pos.quantity, pos.avg_entry_price, pos.realized_pnl);
     }
     
     auto mm_it = market_makers_.find(payload.token_id);
@@ -177,9 +173,16 @@ void StrategyEngine::handleOrderFill(const Event& event) {
             payload.fill_price
         );
     }
-    
-    if (trade_logger_) {
-        trade_logger_->logOrderFilled(
+
+    auto& book = order_books_[payload.token_id];
+    double spread_bps = (book.getSpread() / book.getMid()) * 10000;
+    double imbalance = book.getImbalance();
+
+    LOG_INFO("  Market context: spread={:.1f}bps, imbalance={:.2f}, our_inventory={}", 
+         spread_bps, imbalance, mm_it->second.getInventory());
+
+    if (trading_logger_) {
+        trading_logger_->logOrderFilled(
             market_name,
             payload.order_id,
             payload.token_id,
@@ -195,8 +198,7 @@ void StrategyEngine::handleOrderFill(const Event& event) {
 
 void StrategyEngine::handleOrderRejected(const Event& event) {
     auto& payload = std::get<OrderRejectedPayload>(event.payload);
-    std::cerr << "Order rejected: " << payload.order_id
-              << " - Reason: " << payload.reason << "\n";
+    LOG_ERROR("Order rejected: {} - Reason: {}", payload.order_id, payload.reason);
     
     // TODO: Handle rejection logic
 }
@@ -205,14 +207,14 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
                                    const std::string& market_name) {
     auto it = order_books_.find(token_id);
     if (it == order_books_.end()) {
-        std::cerr << "No order book found for token: " << token_id << ", market: " << market_name << "\n";
+        LOG_ERROR("No order book found for token: {} , market: {}", token_id, market_name);
         return;
     }
     
     const OrderBook& book = it->second;
     
     if (!book.hasValidBBO()) {
-        std::cout << "No valid BBO for " << token_id << ", skipping quote calculation\n";
+        LOG_WARN("No valid BBO for {}, skipping quote calculation", token_id);
         return;
     }
     
@@ -241,12 +243,12 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
         }
         
         if (has_matching_bid && has_matching_ask) {
-            std::cout << "  Orders already at target prices, no update needed\n";
+            LOG_INFO("  Orders already at target prices, no update needed");
             return;
         }
-        std::cout << "\n  PLACING ORDERS:\n";
-        std::cout << "  BID: " << quote.bid_price << " x " << quote.bid_size << "\n";
-        std::cout << "  ASK: " << quote.ask_price << " x " << quote.ask_size << "\n";
+        LOG_INFO("\n  PLACING ORDERS:");
+        LOG_INFO("  BID: {} x {}", quote.bid_price, quote.bid_size);
+        LOG_INFO("  ASK: {} x {}", quote.ask_price, quote.ask_size);
         
         order_manager_.cancelAllOrders(token_id, market_name);
         
@@ -258,7 +260,7 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
 OrderBook& StrategyEngine::getOrCreateOrderBook(const TokenId& token_id, const std::string& market_name) {
     auto it = order_books_.find(token_id);
     if (it == order_books_.end()) {
-        std::cout << "Creating new order book for token: " << market_name << "\n";
+        LOG_DEBUG("Creating new order book for token: {}", market_name);
         auto result = order_books_.emplace(token_id, OrderBook(token_id));
         return result.first->second;
     }
@@ -270,7 +272,7 @@ void StrategyEngine::registerMarket(const TokenId& token_id,
                     const std::string& outcome,
                     const std::string& market_id = "") {
     market_metadata_[token_id] = {title, outcome, market_id};
-    std::cout << "Registered: " << title << " - " << outcome << "\n";
+    LOG_DEBUG("Registered: {} - {}", title, outcome);
 }
 
 size_t StrategyEngine::getPositionCount() const {
@@ -342,30 +344,61 @@ void StrategyEngine::updatePosition(const TokenId& token_id, double qty, double 
 }
 
 void StrategyEngine::startLogging(const std::string& event_name) {
-    if (trade_logger_) {
-        trade_logger_->startSession(event_name);
+    if (trading_logger_) {
+        trading_logger_->startSession(event_name);
     }
 }
 
 void StrategyEngine::snapshotPositions() {
-    if (!trade_logger_) return;
+    if (!state_persistence_ && !trading_logger_) return;
     
-    std::unordered_map<TokenId, double> positions;
-    std::unordered_map<TokenId, double> avg_costs;
-    std::unordered_map<TokenId, double> market_values;
+    std::lock_guard<std::mutex> lock(positions_mutex_);
     
-    for (const auto& [token_id, mm] : market_makers_) {
-        positions[token_id] = mm.getInventory();
+    // Save state for recovery
+    if (state_persistence_) {
+        TradingState state;
+        state.last_session_id = trading_logger_ ? trading_logger_->getSessionId() : "";
+        state.last_updated = std::chrono::system_clock::now();
         
-        auto ob_it = order_books_.find(token_id);
-        if (ob_it != order_books_.end()) {
-            double mid = ob_it->second.getMid();
-            market_values[token_id] = mm.getInventory() * mid;
-            avg_costs[token_id] = mid;  // Simplified
+        for (const auto& [token_id, pos] : positions_) {
+            PositionState ps;
+            ps.quantity = pos.quantity;
+            ps.avg_cost = pos.avg_entry_price;
+            ps.realized_pnl = pos.realized_pnl;
+            state.positions[token_id] = ps;
+            state.total_realized_pnl += pos.realized_pnl;
         }
+        
+        // Would need to track these properly
+        state.total_trades = 0;  // TODO: track in strategy
+        state.total_volume = 0.0;  // TODO: track in strategy
+        
+        state_persistence_->saveState(state);
     }
     
-    trade_logger_->snapshotPositions(positions, avg_costs, market_values);
+    // Log positions for audit trail
+    if (trading_logger_) {
+        for (const auto& [token_id, pos] : positions_) {
+            auto ob_it = order_books_.find(token_id);
+            double market_value = 0.0;
+            double unrealized_pnl = 0.0;
+            
+            if (ob_it != order_books_.end() && ob_it->second.getMid() > 0) {
+                double mid = ob_it->second.getMid();
+                market_value = pos.quantity * mid;
+                unrealized_pnl = pos.quantity * (mid - pos.avg_entry_price);
+            }
+            
+            std::string market_name = token_id;
+            auto meta_it = market_metadata_.find(token_id);
+            if (meta_it != market_metadata_.end()) {
+                market_name = meta_it->second.title + " - " + meta_it->second.outcome;
+            }
+            
+            trading_logger_->logPosition(market_name, token_id, pos.quantity, 
+                                        pos.avg_entry_price, market_value, unrealized_pnl);
+        }
+    }
 }
 
 } // namespace pmm

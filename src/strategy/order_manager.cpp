@@ -1,25 +1,25 @@
 #include "strategy/order_manager.hpp"
-#include "utils/trade_logger.hpp"
+#include "utils/trading_logger.hpp"
+#include "utils/logger.hpp"
 #include <iostream>
 
 namespace pmm {
 
-OrderManager::OrderManager(EventQueue& event_queue, TradingMode mode, TradeLogger* logger)
+OrderManager::OrderManager(EventQueue& event_queue, TradingMode mode, TradingLogger* trading_logger)
     : event_queue_(event_queue),
       trading_mode_(mode),
       next_order_id_(1),
-      trade_logger_(logger) {
+      trading_logger_(trading_logger) {
     
     std::string mode_str = (mode == TradingMode::PAPER) ? "PAPER TRADING" : "LIVE";
-    std::cout << "OrderManager initialized (" << mode_str << ")\n";
+    LOG_INFO("OrderManager initialized ({})", mode_str);
 }
 
 void OrderManager::setTradingMode(TradingMode mode) {
     if (mode != trading_mode_) {
-        std::cout << "Switching trading mode from " 
-                  << (trading_mode_ == TradingMode::PAPER ? "PAPER" : "LIVE")
-                  << " to "
-                  << (mode == TradingMode::PAPER ? "PAPER" : "LIVE") << "\n";
+        LOG_INFO("Switching trading mode from {} to {}", 
+                 (trading_mode_ == TradingMode::PAPER ? "PAPER" : "LIVE"),
+                 (mode == TradingMode::PAPER ? "PAPER" : "LIVE"));
         trading_mode_ = mode;
     }
 }
@@ -40,48 +40,45 @@ OrderId OrderManager::placeOrder(const TokenId& token_id, Side side, Price price
     
     orders_[order_id] = order;
 
-    if (trade_logger_) {
-        trade_logger_->logOrderPlaced(order, market_id);
+    if (trading_logger_) {
+        trading_logger_->logOrderPlaced(order, market_id);
     }
 
     if (trading_mode_ == TradingMode::PAPER) {
-        std::cout << "[PAPER] Order placed: " << order_id 
-                  << " - " << (side == Side::BUY ? "BUY" : "SELL")
-                  << " " << size << " @ " << price << "\n";
+        LOG_INFO("[PAPER] Order placed: {} - {} {} @ {}", order_id, (side == Side::BUY ? "BUY" : "SELL"), size, price);
     } else {
-        std::cout << "[LIVE] Placing order: " << order_id 
-                  << " - " << (side == Side::BUY ? "BUY" : "SELL")
-                  << " " << size << " @ " << price << "\n";
+        LOG_INFO("[LIVE] Placing order: {} - {} {} @ {}", order_id, (side == Side::BUY ? "BUY" : "SELL"), size, price);
         placeOrderLive(order);
     }
     
     return order_id;
 }
 
-void OrderManager::cancelOrder(const OrderId& order_id, const std::string& market_id) {
+bool OrderManager::cancelOrder(const OrderId& order_id, const std::string& market_id) {
     auto it = orders_.find(order_id);
     if (it == orders_.end()) {
-        std::cerr << "Order not found: " << order_id << "\n";
-        return;
+        LOG_ERROR("Order not found: {}", order_id);
+        return false;
     }
 
     Order& order = it->second;
     order.status = OrderStatus::CANCELLED;
     
-    if (trade_logger_) {
-        trade_logger_->logOrderCancelled(order_id, order, market_id);
+    if (trading_logger_) {
+        trading_logger_->logOrderCancelled(order_id, order, market_id);
     }
 
     if (trading_mode_ == TradingMode::PAPER) {
-        std::cout << "[PAPER] Order cancelled: " << order_id << "\n";
+        LOG_INFO("[PAPER] Order cancelled: {}", order_id);
         orders_.erase(it);
     } else {
-        std::cout << "[LIVE] Cancelling order: " << order_id << "\n";
+        LOG_INFO("[LIVE] Cancelling order: {}", order_id);
         cancelOrderLive(order_id);
     }
+    return true;
 }
 
-void OrderManager::cancelAllOrders(const TokenId& token_id, const std::string& market_id) {
+bool OrderManager::cancelAllOrders(const TokenId& token_id, const std::string& market_id) {
     std::vector<OrderId> to_cancel;
     
     for (const auto& [order_id, order] : orders_) {
@@ -91,19 +88,28 @@ void OrderManager::cancelAllOrders(const TokenId& token_id, const std::string& m
     }
     
     for (const auto& order_id : to_cancel) {
-        cancelOrder(order_id, market_id);
+        if (!cancelOrder(order_id, market_id)) {
+            LOG_ERROR("Failed to cancel order: {}", order_id);
+            return false;
+        }
     }
+    return true;
 }
 
-void OrderManager::cancelAllOrders() {
+bool OrderManager::cancelAllOrders() {
     std::vector<OrderId> to_cancel;
+    
     for (const auto& [order_id, _] : orders_) {
         to_cancel.push_back(order_id);
     }
     
     for (const auto& order_id : to_cancel) {
-        cancelOrder(order_id, "cancel_all"); //TODO: maybe we add market ID to order
+        if (!cancelOrder(order_id, "cancel_all")) {
+            LOG_ERROR("Failed to cancel order: {}", order_id);
+            return false;
+        }
     }
+    return true;
 }
 
 void OrderManager::updateOrderBook(const TokenId& token_id, const OrderBook& book) {
@@ -133,18 +139,14 @@ void OrderManager::checkForFills(const TokenId& token_id, const OrderBook& book)
             if (book.getBestAsk() > 0 && book.getBestAsk() <= order.price) {
                 should_fill = true;
                 fill_price = order.price; // We pay our bid price
-                std::cout << "[PAPER] BUY order " << order_id 
-                         << " crossed! Market ask " << book.getBestAsk() 
-                         << " <= our bid " << order.price << "\n";
+                LOG_INFO("[PAPER] BUY order {} crossed! Market ask {} <= our bid {}", order_id, book.getBestAsk(), order.price);
             }
         } else { // SELL
             // Sell order fills if best bid >= our ask price
             if (book.getBestBid() > 0 && book.getBestBid() >= order.price) {
                 should_fill = true;
                 fill_price = order.price; // We receive our ask price
-                std::cout << "[PAPER] SELL order " << order_id 
-                         << " crossed! Market bid " << book.getBestBid() 
-                         << " >= our ask " << order.price << "\n";
+                LOG_INFO("[PAPER] SELL order {} crossed! Market bid {} >= our ask {}", order_id, book.getBestBid(), order.price);
             }
         }
         
@@ -173,8 +175,7 @@ void OrderManager::generateFill(const OrderId& order_id, Price fill_price, Size 
     }
     
     std::string side_str = (order.side == Side::BUY) ? "BOUGHT" : "SOLD";
-    std::cout << "[PAPER FILL] " << side_str << " " << fill_size 
-              << " @ " << fill_price << " (order: " << order_id << ")\n";
+    LOG_INFO("[PAPER FILL] {} {} @ {} (order: {})", side_str, fill_size, fill_price, order_id);
     
     // Generate fill event
     auto fill_event = Event::orderFill(
@@ -205,12 +206,12 @@ size_t OrderManager::getOpenOrderCount() const {
 // Stubs for live trading (to be implemented)
 void OrderManager::placeOrderLive(const Order& order) {
     // TODO: Implement Polymarket API order placement
-    std::cerr << "Live order placement not yet implemented\n";
+    LOG_ERROR("Live order placement not yet implemented");
 }
 
 void OrderManager::cancelOrderLive(const OrderId& order_id) {
     // TODO: Implement Polymarket API order cancellation
-    std::cerr << "Live order cancellation not yet implemented\n";
+    LOG_ERROR("Live order cancellation not yet implemented");
 }
 
 } // namespace pmm

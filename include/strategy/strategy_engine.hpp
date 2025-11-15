@@ -5,7 +5,8 @@
 #include "data/order_book.hpp"
 #include "strategy/market_maker.hpp"
 #include "strategy/order_manager.hpp"
-#include "utils/trade_logger.hpp"
+#include "utils/state_persistence.hpp"
+#include "utils/trading_logger.hpp"
 
 #include <map>
 #include <atomic>
@@ -47,7 +48,8 @@ private:
     };
 
     EventQueue& event_queue_;
-    std::unique_ptr<TradeLogger> trade_logger_;
+    std::unique_ptr<StatePersistence> state_persistence_;
+    std::unique_ptr<TradingLogger> trading_logger_;
     OrderManager order_manager_;
     std::atomic<bool> running_;
     std::thread strategy_thread_;

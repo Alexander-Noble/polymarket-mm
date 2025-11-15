@@ -1,4 +1,5 @@
 #include "network/http_client.hpp"
+#include "utils/logger.hpp"
 #include <nlohmann/json.hpp>
 #include <curl/curl.h>
 #include <iostream>
@@ -14,7 +15,7 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 PolymarketHttpClient::PolymarketHttpClient()
     : api_base_url_("https://gamma-api.polymarket.com") {
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    std::cout << "PolymarketHttpClient initialized\n";
+    LOG_INFO("PolymarketHttpClient initialized");
 }
 
 std::string PolymarketHttpClient::httpGet(const std::string& endpoint) {
@@ -32,7 +33,7 @@ std::string PolymarketHttpClient::httpGet(const std::string& endpoint) {
         
         CURLcode res = curl_easy_perform(curl);
         if (res != CURLE_OK) {
-            std::cerr << "CURL error: " << curl_easy_strerror(res) << "\n";
+            LOG_ERROR("CURL error: {}", curl_easy_strerror(res));
         }
         
         curl_easy_cleanup(curl);
@@ -52,7 +53,7 @@ std::vector<EventInfo> PolymarketHttpClient::parseBatch(const std::string& respo
         auto json = nlohmann::json::parse(response);
 
         if (!json.is_array()) {
-            std::cerr << "Expected array response from API\n";
+            LOG_ERROR("Expected array response from API");
             return events;
         }
         
@@ -124,14 +125,14 @@ std::vector<EventInfo> PolymarketHttpClient::parseBatch(const std::string& respo
         }
         
     } catch (const std::exception& e) {
-        std::cerr << "Error parsing batch: " << e.what() << "\n";
+        LOG_ERROR("Error parsing batch: {}", e.what());
     }
     
     return events;
 }
 
 std::vector<EventInfo> PolymarketHttpClient::getActiveEvents(int limit) {
-    std::cout << "Fetching active events from Polymarket...\n";
+    LOG_INFO("Fetching active events from Polymarket...");
     
     std::vector<EventInfo> all_events;
     int offset = 0;
@@ -172,7 +173,7 @@ std::vector<EventInfo> PolymarketHttpClient::getActiveEvents(int limit) {
         
         all_events.insert(all_events.end(), batch.begin(), batch.end());
         
-        std::cout << "Fetched " << batch.size() << " events (total: " << all_events.size() << ")\n";
+        LOG_INFO("Fetched {} events (total: {})", batch.size(), all_events.size());
         
         if (batch.size() < limit) {
             break;
@@ -181,12 +182,12 @@ std::vector<EventInfo> PolymarketHttpClient::getActiveEvents(int limit) {
         offset += limit;
     }
     
-    std::cout << "Total events fetched: " << all_events.size() << "\n";
+    LOG_INFO("Total events fetched: {}", all_events.size());
     return all_events;
 }
 
 std::vector<EventInfo> PolymarketHttpClient::searchEvents(const std::string& query) {
-    std::cout << "Searching for events: \"" << query << "\"\n";
+    LOG_INFO("Searching for events: \"{}\"", query);
     
     // Fetch a batch of active events
     auto events = getActiveEvents(100);
@@ -212,8 +213,6 @@ std::vector<EventInfo> PolymarketHttpClient::searchEvents(const std::string& que
         std::transform(description.begin(), description.end(), description.begin(), ::tolower);
 
         if (
-            // (
-            // lower_question.find(lower_query) != std::string::npos) || 
             (slug.find(lower_query) != std::string::npos) ||
             (description.find(lower_query) != std::string::npos)) {
             
@@ -224,7 +223,7 @@ std::vector<EventInfo> PolymarketHttpClient::searchEvents(const std::string& que
                 lower_title.find("2nd place") != std::string::npos ||
                 lower_title.find("3rd place") != std::string::npos ||
                 lower_title.find("be promoted") != std::string::npos) {
-                continue;  // Skip season-long markets
+                continue;
             }
             
             // Only keep match markets (has "vs." or "win on" or "end in a draw")
@@ -237,7 +236,7 @@ std::vector<EventInfo> PolymarketHttpClient::searchEvents(const std::string& que
         }
     }
     
-    std::cout << "Found " << filtered.size() << " matching markets\n";
+    LOG_INFO("Found {} matching markets", filtered.size());
 
     std::sort(filtered.begin(), filtered.end(), [](const EventInfo& a, const EventInfo& b) {
         if (a.volume != b.volume) {
@@ -249,7 +248,7 @@ std::vector<EventInfo> PolymarketHttpClient::searchEvents(const std::string& que
 }
 
 std::optional<EventInfo> PolymarketHttpClient::getEvent(const std::string& condition_id) {
-    std::cout << "Fetching event: " << condition_id << "\n";
+    LOG_INFO("Fetching event: {}", condition_id);
     
     std::string endpoint = "/events?condition_id=" + condition_id;
     std::string response = httpGet(endpoint);
@@ -281,7 +280,7 @@ std::optional<EventInfo> PolymarketHttpClient::getEvent(const std::string& condi
         }
         
     } catch (const std::exception& e) {
-        std::cerr << "Error parsing market: " << e.what() << "\n";
+        LOG_ERROR("Error parsing market: {}", e.what());
     }
     
     return std::nullopt;

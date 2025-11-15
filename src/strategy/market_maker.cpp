@@ -1,4 +1,5 @@
 #include "strategy/market_maker.hpp"
+#include "utils/logger.hpp"
 #include <iostream>
 #include <algorithm>
 #include <cmath>
@@ -15,10 +16,7 @@ MarketMaker::MarketMaker(double spread_pct, double max_position)
       last_mid_(0.0),
       last_update_time_(std::chrono::steady_clock::now()) {
     
-    std::cout << "MarketMaker initialized: spread=" << spread_pct 
-              << ", max_pos=" << max_position 
-              << ", gamma=" << risk_aversion_ 
-              << ", sigma=" << volatility_ << "\n";
+    LOG_INFO("MarketMaker initialized: spread={}, max_pos={}, gamma={}, sigma={}", spread_pct, max_position, risk_aversion_, volatility_);
 }
 
 std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
@@ -37,42 +35,12 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
     last_update_time_ = std::chrono::steady_clock::now();
     
     if (market_spread < 0.01) {
-        std::cout << "Market spread too tight (" << market_spread << "), not quoting\n";
+        LOG_INFO("Market spread too tight ({}), not quoting", market_spread);
         return std::nullopt;
     }
     
     double target_spread_dollars = mid * spread_pct_;
-    // double q = inventory_ / 100.0; // Normalize inventory
-    // double gamma = risk_aversion_;
-    // double sigma_sq = volatility_ * volatility_;
-    
-    // // Single reservation price with inventory skew
-    // double reservation_price = mid - q * gamma * sigma_sq;
-    
-    // // Optimal spread from AV (simplified)
-    // double optimal_spread = gamma * sigma_sq + (2.0 / gamma) * std::log(1.0 + gamma / spread_pct_);
-    
-    // // Use the larger of target spread or optimal spread
-    // double actual_spread = std::max(target_spread_dollars, optimal_spread);
-    
-    // std::cout << "  AV calculation:\n";
-    // std::cout << "    q (normalized inventory): " << q << "\n";
-    // std::cout << "    gamma: " << gamma << ", sigma: " << volatility_ << "\n";
-    // std::cout << "    reservation_price: " << reservation_price << "\n";
-    // std::cout << "    optimal_spread: " << optimal_spread << ", target_spread: " << target_spread_dollars << "\n";
 
-    // // Apply spread symmetrically around reservation price
-    // Price our_bid = reservation_price - actual_spread / 2.0;
-    // Price our_ask = reservation_price + actual_spread / 2.0;
-        
-    // double imbalance = book.getImbalance();
-    // double imbalance_adjustment = imbalance * 0.005;  // Max 0.5% adjustment
-    
-    // our_bid += imbalance_adjustment;
-    // our_ask += imbalance_adjustment;
-    
-    // std::cout << "    imbalance: " << imbalance << "  adjustment: " << imbalance_adjustment << "\n";
-    
     double q = inventory_ / 100.0; // Normalize inventory
     double gamma = risk_aversion_;
     double sigma_sq = volatility_ * volatility_; // Assume some volatility estimate
@@ -80,12 +48,12 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
     double reservation_bid = mid - (q + 1.0) * gamma * sigma_sq;
     double reservation_ask = mid + (q - 1.0) * gamma * sigma_sq;
 
-    std::cout << "  AV calculation:\n";
-    std::cout << "    q (normalized inventory): " << q << "\n";
-    std::cout << "    gamma: " << gamma << ", sigma: " << volatility_ << "\n";
-    std::cout << "    reservation_bid: " << reservation_bid << "\n";
-    std::cout << "    reservation_ask: " << reservation_ask << "\n";
-
+    LOG_DEBUG("  AV calculation:");
+    LOG_DEBUG("    q (normalized inventory): {}", q);
+    LOG_DEBUG("    gamma: {}, sigma: {}", gamma, volatility_);
+    LOG_DEBUG("    reservation_bid: {}", reservation_bid);
+    LOG_DEBUG("    reservation_ask: {}", reservation_ask);
+    LOG_DEBUG("    target_spread: {}", target_spread_dollars);
     Price our_bid = reservation_bid - target_spread_dollars / 2.0;
     Price our_ask = reservation_ask + target_spread_dollars / 2.0;
         
@@ -95,22 +63,49 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
     our_bid += imbalance_adjustment;
     our_ask += imbalance_adjustment;
     
-    std::cout << "    imbalance: " << imbalance << "  adjustment: " << imbalance_adjustment << "\n";
+    LOG_DEBUG("    imbalance: {}  adjustment: {}", imbalance, imbalance_adjustment);
     
     our_bid = roundToCent(our_bid);
     our_ask = roundToCent(our_ask);
+    
+    // Time-aware risk-adjusted cost floor
+    if (inventory_ > 0 && avg_cost_ > 0) {
+        double inventory_risk = std::abs(inventory_dollars_) / max_position_;
+        double time_urgency = getTimeUrgency();
+        
+        // Base profit requirement: 1.5% when no urgency
+        double base_min_profit = 0.015;
+        
+        // Reduce profit requirement based on time urgency and inventory risk
+        double urgency_factor = std::max(time_urgency, inventory_risk);
+        double min_profit_pct = base_min_profit * (1.0 - urgency_factor);
+        
+        // At very high urgency (>90%), accept small losses to exit
+        if (urgency_factor > 0.9) {
+            min_profit_pct = -0.01;  // Accept up to 1% loss
+        }
+        
+        double min_ask = avg_cost_ * (1.0 + min_profit_pct);
+        
+        if (our_ask < min_ask) {
+            LOG_DEBUG("    Adjusting ask from {} to {} (avg_cost: {}, urgency: {:.1f}%, inv_risk: {:.1f}%, min_profit: {:.2f}%)", 
+                     our_ask, min_ask, avg_cost_, time_urgency * 100, inventory_risk * 100, min_profit_pct * 100);
+            our_ask = min_ask;
+        }
+    }
+    
     // Clip to valid price range [0.01, 0.99] for binary markets
     our_bid = std::max(0.01, std::min(0.99, our_bid));
     our_ask = std::max(0.01, std::min(0.99, our_ask));
     
 
     if (our_ask <= our_bid) {
-        std::cout << "Quotes collapsed after clipping (bid=" << our_bid << ", ask=" << our_ask << "), not quoting\n";
+        LOG_INFO("Quotes collapsed after clipping (bid={}, ask={}), not quoting", our_bid, our_ask);
         return std::nullopt;
     }
 
     if (our_bid >= book.getBestAsk() || our_ask <= book.getBestBid()) {
-        std::cout << "Our quotes would cross the market, not quoting\n";
+        LOG_INFO("Our quotes would cross the market, not quoting");
         return std::nullopt;
     }
     
@@ -119,15 +114,13 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
     Size quote_size = std::min(100.0, remaining_capacity / mid);
 
     if (quote_size < 10.0) {
-        std::cout << "Near max position (remaining: $" << remaining_capacity << "), not quoting\n";
+        LOG_INFO("Near max position (remaining: ${}), not quoting", remaining_capacity);
         return std::nullopt;
     }
 
     Quote quote{our_bid, quote_size, our_ask, quote_size};
     
-    std::cout << "Generated quote: Bid " << our_bid << " x " << quote_size
-              << " / Ask " << our_ask << " x " << quote_size 
-              << " (inventory: " << inventory_ << ")\n";
+    LOG_INFO("Generated quote: Bid {} x {} / Ask {} x {} (inventory: {})", our_bid, quote_size, our_ask, quote_size, inventory_);
     
     return quote;
 }
@@ -144,7 +137,7 @@ void MarketMaker::updateInventory(Side side, Size filled_size, Price fill_price)
             avg_cost_ = inventory_dollars_ / inventory_;
         }
         
-        std::cout << "  Bought " << filled_size << " @ " << fill_price << "\n";
+        LOG_INFO("  Bought {} @ {}", filled_size, fill_price);
         
     } else {
         double old_inventory_for_pnl = old_inventory;
@@ -157,17 +150,15 @@ void MarketMaker::updateInventory(Side side, Size filled_size, Price fill_price)
             double pnl = closing_size * (fill_price - avg_cost_);
             realized_pnl_ += pnl;
             
-            std::cout << "  Sold " << closing_size << " @ " << fill_price 
-                      << " (closed long @ " << avg_cost_ << ", PnL: $" << pnl << ")\n";
+            LOG_INFO("  Sold {} @ {} (closed long @ {}, PnL: ${})", closing_size, fill_price, avg_cost_, pnl);
             
             // If oversold (went short)
             if (filled_size > closing_size) {
                 double opening_short = filled_size - closing_size;
-                std::cout << "  Opened short: " << opening_short << " @ " << fill_price << "\n";
+                LOG_INFO("  Opened short: {} @ {}", opening_short, fill_price);
             }
         } else {
-            std::cout << "  Sold " << filled_size << " @ " << fill_price 
-                      << " (opening/adding to short)\n";
+            LOG_INFO("  Sold {} @ {} (opening/adding to short)", filled_size, fill_price);
         }
         
         // Update inventory_dollars based on NEW position
@@ -185,8 +176,7 @@ void MarketMaker::updateInventory(Side side, Size filled_size, Price fill_price)
         }
     }
     
-    std::cout << "  Inventory: " << inventory_ << " shares ($" << inventory_dollars_ 
-              << "), Realized P&L: $" << realized_pnl_ << "\n";
+    LOG_INFO("  Inventory: {} shares (${}), Realized P&L: ${}", inventory_, inventory_dollars_, realized_pnl_);
 }
 
 void MarketMaker::updateVolatility(Price old_mid, Price new_mid, double time_elapsed_seconds) {
@@ -206,7 +196,7 @@ void MarketMaker::updateVolatility(Price old_mid, Price new_mid, double time_ela
     // Only log if significant change
     static double last_logged_vol = 0.0;
     if (std::abs(volatility_ - last_logged_vol) > 0.01) {
-        std::cout << "  Volatility updated: " << volatility_ << "\n";
+        LOG_DEBUG("  Volatility updated: {}", volatility_);
         last_logged_vol = volatility_;
     }
 }
@@ -215,6 +205,34 @@ Price MarketMaker::roundToCent(Price price) {
     return std::round(price * 100.0) / 100.0;
 }
 
+void MarketMaker::setMarketCloseTime(std::chrono::system_clock::time_point close_time) {
+    market_close_time_ = close_time;
+    has_close_time_ = true;
+    LOG_DEBUG("Market close time set");
+}
 
+double MarketMaker::getTimeUrgency() const {
+    if (!has_close_time_) {
+        return 0.0;  // No urgency if we don't know close time
+    }
+    
+    auto now = std::chrono::system_clock::now();
+    auto time_to_close = std::chrono::duration_cast<std::chrono::hours>(market_close_time_ - now);
+    double hours_remaining = time_to_close.count();
+    
+    if (hours_remaining < 0) {
+        return 1.0;  // Market closed or past close
+    }
+    
+    // Urgency ramps up as we approach close
+    // 0-24 hours: linear urgency increase
+    // >24 hours: minimal urgency
+    if (hours_remaining > 24.0) {
+        return 0.0;
+    }
+    
+    // Linear ramp: 24h = 0.0, 0h = 1.0
+    return 1.0 - (hours_remaining / 24.0);
+}
 
 } // namespace pmm

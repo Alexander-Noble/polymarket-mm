@@ -42,6 +42,8 @@ public:
         return running_.load();
     }
     
+    void setReconnectConfig(int max_attempts = 5, std::chrono::seconds backoff = std::chrono::seconds(5));
+
 private:
     EventQueue& event_queue_;
     
@@ -60,6 +62,10 @@ private:
     std::vector<std::string> subscribed_assets_;
     std::mutex subscription_mutex_;
     
+    int max_reconnect_attempts_ = 5;
+    std::chrono::seconds reconnect_backoff_{5};
+    int reconnect_attempt_ = 0;
+
     void run();
     void sendSubscription();
     void parseUrl(const std::string& url);
@@ -70,6 +76,9 @@ private:
 
     void startAsyncRead(beast::flat_buffer& buffer);
     void startPingTimer();
+
+    void attemptReconnect();
+    void handleDisconnection(const std::string& reason);
 };
 
 } // namespace pmm

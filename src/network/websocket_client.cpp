@@ -1,4 +1,5 @@
 #include "network/websocket_client.hpp"
+#include "utils/logger.hpp"
 #include <iostream>
 #include <stdexcept>
 
@@ -10,8 +11,8 @@ PolymarketWebSocketClient::PolymarketWebSocketClient(
 ) : event_queue_(queue),
     url_(url) {
     parseUrl(url_);
-    std::cout << "WebSocket Client initialized with URL: " << url_ << std::endl;
-    std::cout << "Host: " << host_ << ", Port: " << port_ << ", Path: " << path_ << std::endl;
+    LOG_INFO("WebSocket Client initialized with URL: {}", url_);
+    LOG_INFO("Host: {}, Port: {}, Path: {}", host_, port_, path_);
 }
 
 PolymarketWebSocketClient::~PolymarketWebSocketClient() {
@@ -45,13 +46,13 @@ void PolymarketWebSocketClient::parseUrl(const std::string& url) {
 
 void PolymarketWebSocketClient::connect() {
     if (running_.load()) {
-        std::cout << "WebSocket Client is already connected." << std::endl;
+        LOG_INFO("WebSocket Client is already connected.");
         return;
     }
 
     running_ = true;
     ws_thread_ = std::thread(&PolymarketWebSocketClient::run, this);
-    std::cout << "WebSocket Client connecting to " << url_ << std::endl;
+    LOG_INFO("WebSocket Client connecting to {}", url_);
 
     int attempts = 0;
     while (!connected_.load() && attempts < 50) {
@@ -60,9 +61,9 @@ void PolymarketWebSocketClient::connect() {
     }
     
     if (connected_.load()) {
-        std::cout << "WebSocket connected successfully\n";
+        LOG_INFO("WebSocket connected successfully");
     } else {
-        std::cout << "WebSocket connection delayed (may still be connecting)\n";
+        LOG_WARN("WebSocket connection delayed (may still be connecting)");
     }
 }
 
@@ -71,7 +72,7 @@ void PolymarketWebSocketClient::disconnect() {
         return;
     }
     
-    std::cout << "Disconnecting WebSocket...\n";
+    LOG_INFO("Disconnecting WebSocket...");
     
     running_.store(false);
     connected_.store(false);
@@ -84,12 +85,12 @@ void PolymarketWebSocketClient::disconnect() {
         ws_thread_.join();
     }
     
-    std::cout << "WebSocket disconnected\n";
+    LOG_INFO("WebSocket disconnected");
 }
 
 void PolymarketWebSocketClient::run() {
     try {
-        std::cout << "Connecting to " << host_ << ":" << port_ << path_ << "\n";
+        LOG_INFO("Connecting to {}:{}{}", host_, port_, path_);
         
         ioc_ = std::make_shared<net::io_context>();
         ssl::context ctx{ssl::context::tlsv12_client};
@@ -111,15 +112,15 @@ void PolymarketWebSocketClient::run() {
         
         // Connect
         auto ep = net::connect(beast::get_lowest_layer(*ws_), results);
-        std::cout << "TCP connected to " << ep << "\n";
+        LOG_DEBUG("TCP connected");
         
         // SSL handshake
         ws_->next_layer().handshake(ssl::stream_base::client);
-        std::cout << "SSL handshake complete\n";
+        LOG_DEBUG("SSL handshake complete");
         
         // WebSocket handshake
         ws_->handshake(host_, path_);
-        std::cout << "WebSocket connected!\n";
+        LOG_DEBUG("WebSocket connected");
         
         // Set options
         ws_->read_message_max(64 * 1024 * 1024);
@@ -138,27 +139,27 @@ void PolymarketWebSocketClient::run() {
         startPingTimer();
         
         // Run the io_context
-        std::cout << "Starting io_context event loop\n";
+        LOG_DEBUG("Starting io_context event loop");
         ioc_->run();
         
-        std::cout << "WebSocket read loop exited\n";
+        LOG_DEBUG("WebSocket read loop exited");
         
         // Clean close
         if (ws_ && ws_->is_open()) {
             beast::error_code ec;
             ws_->close(websocket::close_code::normal, ec);
             if (ec) {
-                std::cerr << "Error closing WebSocket: " << ec.message() << "\n";
+                LOG_ERROR("Error closing WebSocket: {}", ec.message());
             }
         }
         
     } catch (const std::exception& e) {
-        std::cerr << "WebSocket exception: " << e.what() << "\n";
+        LOG_ERROR("WebSocket exception: {}", e.what());
     }
     
     connected_.store(false);
     running_.store(false);
-    std::cout << "WebSocket thread finished\n";
+    LOG_INFO("WebSocket thread finished");
 }
 
 void PolymarketWebSocketClient::startAsyncRead(beast::flat_buffer& buffer) {
@@ -167,11 +168,13 @@ void PolymarketWebSocketClient::startAsyncRead(beast::flat_buffer& buffer) {
     ws_->async_read(buffer,
         [this, &buffer](beast::error_code ec, std::size_t bytes_transferred) {
             if (ec) {
-                if (ec != websocket::error::closed && 
-                    ec != net::error::operation_aborted) {
-                    std::cerr << "WebSocket read error: " << ec.message() << "\n";
+                if (ec == websocket::error::closed) {
+                    handleDisconnection("Connection closed by remote");
+                } else if (ec != net::error::operation_aborted) {
+                    handleDisconnection(ec.message());
+                } else {
+                    ioc_->stop();
                 }
-                ioc_->stop();
                 return;
             }
             
@@ -197,7 +200,7 @@ void PolymarketWebSocketClient::startPingTimer() {
         // Send ping
         ws_->async_ping({}, [](beast::error_code ec) {
             if (ec) {
-                std::cerr << "Ping error: " << ec.message() << "\n";
+                LOG_ERROR("Ping error: {}", ec.message());
             }
         });
         
@@ -212,10 +215,10 @@ void PolymarketWebSocketClient::subscribe(const std::vector<std::string>& asset_
     
     subscribed_assets_ = asset_ids;
     
-    std::cout << "Queued subscription for " << asset_ids.size() << " assets\n";
-    std::cout << connected_.load() << "\n";
-    std::cout << (ws_->is_open() ? "ws_ is valid\n" : "ws_ is null\n");
-    std::cout << (ioc_ ? "ioc_ is valid\n" : "ioc_ is null\n");
+    LOG_DEBUG("Queued subscription for {} assets", asset_ids.size());
+    LOG_DEBUG("Connected: {}", connected_.load());
+    LOG_DEBUG("WebSocket is {}", ws_->is_open() ? "open" : "closed");
+    LOG_DEBUG("IO context is {}", ioc_ ? "valid" : "null");
     // if (connected_.load() && ws_) {
     //     if (ioc_) {
     //         net::post(*ioc_, [this]() {
@@ -224,22 +227,22 @@ void PolymarketWebSocketClient::subscribe(const std::vector<std::string>& asset_
     //     }
     // }
     if (connected_.load() && ws_ && ws_->is_open()) {
-        std::cout << "WebSocket is connected, sending subscription now\n";
+        LOG_DEBUG("WebSocket is connected, sending subscription now");
         sendSubscription();
     } else {
-        std::cout << "WebSocket not ready, subscription will be sent when connected\n";
+        LOG_DEBUG("WebSocket not ready, subscription will be sent when connected");
     }
 }
 
 void PolymarketWebSocketClient::sendSubscription() {
-    std::cout << "Sending subscription for " << subscribed_assets_.size() << " assets...\n";
+    LOG_INFO("Sending subscription for {} assets...", subscribed_assets_.size());
     if (subscribed_assets_.empty()) {
-        std::cout << "No assets to subscribe to\n";
+        LOG_DEBUG("No assets to subscribe to");
         return;
     }
     
     if (!ws_ || !ws_->is_open()) {
-        std::cout << "WebSocket not ready for subscription\n";
+        LOG_DEBUG("WebSocket not ready for subscription");
         return;
     }
     
@@ -249,13 +252,13 @@ void PolymarketWebSocketClient::sendSubscription() {
         sub_msg["assets_ids"] = subscribed_assets_;
         
         std::string msg_str = sub_msg.dump();
-        std::cout << "Sending subscription: " << msg_str << "\n";
+        LOG_DEBUG("Sending subscription: {}", msg_str);
         
         ws_->write(net::buffer(msg_str));
-        std::cout << "Subscription sent for " << subscribed_assets_.size() << " assets\n";
+        LOG_DEBUG("Subscription sent for {} assets", subscribed_assets_.size());
         
     } catch (const std::exception& e) {
-        std::cerr << "Error sending subscription: " << e.what() << "\n";
+        LOG_ERROR("Error sending subscription: {}", e.what());
     }
 }
 
@@ -273,13 +276,13 @@ void PolymarketWebSocketClient::handleMessage(const std::string& message) {
         }
         
     } catch (const std::exception& e) {
-        std::cerr << "Error parsing message: " << e.what() << "\n";
+        LOG_ERROR("Error parsing message: {}", e.what());
     }
 }
 
 void PolymarketWebSocketClient::parseMessage(const nlohmann::json& json_msg) {
     if (json_msg.find("event_type") == json_msg.end()) {
-        std::cout << "Unknown message format, missing event_type\n" << json_msg.dump();
+        LOG_DEBUG("Unknown message format, missing event_type\n{}", json_msg.dump());
         return;
     }
     std::string event_type = json_msg["event_type"];
@@ -289,7 +292,7 @@ void PolymarketWebSocketClient::parseMessage(const nlohmann::json& json_msg) {
     } else if (event_type == "price_change") {
         parsePriceChangeMessage(json_msg);
     } else {
-        std::cout << "Received " << event_type << " message\n";
+        LOG_DEBUG("Received {} message", event_type);
     }
 }
 
@@ -311,8 +314,7 @@ void PolymarketWebSocketClient::parseBookMessage(const nlohmann::json& msg) {
         asks.push_back({price, size});
     }
 
-    std::cout << "Pushed book event for " << asset_id.substr(0, 8)
-              << " (bids: " << bids.size() << ", asks: " << asks.size() << ")\n";
+    LOG_DEBUG("Pushed book event for {} (bids: {}, asks: {})", asset_id.substr(0, 8), bids.size(), asks.size());
 
     auto event = Event::bookSnapshot(asset_id, std::move(bids), std::move(asks));
     event_queue_.push(std::move(event));
@@ -320,7 +322,7 @@ void PolymarketWebSocketClient::parseBookMessage(const nlohmann::json& msg) {
 
 void PolymarketWebSocketClient::parsePriceChangeMessage(const nlohmann::json& msg) {
     auto price_changes = msg["price_changes"]; 
-    std::cout << "Received price change message with " << price_changes.size() << " changes.\n";
+    LOG_DEBUG("Received price change message with {} changes.", price_changes.size());
     
     for (const auto& change : price_changes) {
         std::string asset_id = change["asset_id"];
@@ -331,8 +333,7 @@ void PolymarketWebSocketClient::parsePriceChangeMessage(const nlohmann::json& ms
         std::string side_str = change["side"];
         Side side = (side_str == "BUY") ? Side::BUY : Side::SELL;
 
-        std::cout << "Price change for asset " << asset_id << ": " << price
-                  << " x " << size << " (" << side_str << ")\n";
+        LOG_DEBUG("Price change for asset {}: {} x {} ({})", asset_id, price, size, side_str);
 
         std::vector<std::pair<Price, Size>> bids;
         std::vector<std::pair<Price, Size>> asks;
@@ -346,6 +347,47 @@ void PolymarketWebSocketClient::parsePriceChangeMessage(const nlohmann::json& ms
         auto event = Event::priceLevelUpdate(asset_id, std::move(bids), std::move(asks));
         event_queue_.push(std::move(event));
     }   
+}
+
+void PolymarketWebSocketClient::setReconnectConfig(int max_attempts, std::chrono::seconds backoff) {
+    max_reconnect_attempts_ = max_attempts;
+    reconnect_backoff_ = backoff;
+}
+
+void PolymarketWebSocketClient::handleDisconnection(const std::string& reason) {
+    LOG_WARN("WebSocket disconnected: {}", reason);
+    
+    if (!running_.load()) {
+        LOG_INFO("Shutdown requested, not reconnecting");
+        return;
+    }
+    
+    attemptReconnect();
+}
+
+
+void PolymarketWebSocketClient::attemptReconnect() {
+    reconnect_attempt_++;
+    
+    if (reconnect_attempt_ > max_reconnect_attempts_) {
+        LOG_ERROR("Max reconnection attempts ({}) exceeded", max_reconnect_attempts_);
+        event_queue_.push(Event::shutdown("WebSocket reconnection failed"));
+        return;
+    }
+    
+    auto delay = reconnect_backoff_ * reconnect_attempt_;
+    LOG_INFO("Reconnecting in {}s (attempt {}/{})", delay.count(), reconnect_attempt_, max_reconnect_attempts_);
+    
+    std::this_thread::sleep_for(delay);
+    
+    try {
+        connect();
+        reconnect_attempt_ = 0;  // Reset on success
+        LOG_INFO("Reconnection successful");
+    } catch (const std::exception& e) {
+        LOG_ERROR("Reconnection failed: {}", e.what());
+        attemptReconnect();  // Try again
+    }
 }
 
 } // namespace pmm

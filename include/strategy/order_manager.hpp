@@ -16,17 +16,17 @@ enum class TradingMode {
     LIVE
 };
 
-class TradeLogger; 
+class TradingLogger; 
 
 class OrderManager {
 public:
-    explicit OrderManager(EventQueue& event_queue, TradingMode mode = TradingMode::PAPER, TradeLogger* logger = nullptr);
+    explicit OrderManager(EventQueue& event_queue, TradingMode mode = TradingMode::PAPER, TradingLogger* logger = nullptr);
     
     OrderId placeOrder(const TokenId& token_id, Side side, Price price, Size size, const std::string& market_id);
 
-    void cancelOrder(const OrderId& order_id, const std::string& market_id);
-    void cancelAllOrders(const TokenId& token_id, const std::string& market_id);
-    void cancelAllOrders();
+    bool cancelOrder(const OrderId& order_id, const std::string& market_id);
+    bool cancelAllOrders(const TokenId& token_id, const std::string& market_id);
+    bool cancelAllOrders();
 
     void updateOrderBook(const TokenId& token_id, const OrderBook& book);
     
@@ -41,7 +41,7 @@ public:
 private:
     EventQueue& event_queue_;
     TradingMode trading_mode_;
-    TradeLogger* trade_logger_; 
+    TradingLogger* trading_logger_; 
 
     std::unordered_map<OrderId, Order> orders_;
     uint64_t next_order_id_;

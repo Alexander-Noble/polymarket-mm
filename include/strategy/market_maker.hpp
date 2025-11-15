@@ -26,6 +26,10 @@ public:
     double getRealizedPnL() const { return realized_pnl_; }
     
     void updateVolatility(Price old_mid, Price new_mid, double time_elapsed_seconds);
+    
+    // Time-aware risk management
+    void setMarketCloseTime(std::chrono::system_clock::time_point close_time);
+    double getTimeUrgency() const;  // Returns 0.0 (no urgency) to 1.0 (very urgent)
 
 private:
     double spread_pct_;      // Target spread (e.g., 0.02 = 2%)
@@ -44,6 +48,10 @@ private:
     // For volatility calculation
     Price last_mid_;
     std::chrono::steady_clock::time_point last_update_time_;
+    
+    // Market timing
+    std::chrono::system_clock::time_point market_close_time_;
+    bool has_close_time_ = false;
 
     Price roundToCent(Price price);
 };

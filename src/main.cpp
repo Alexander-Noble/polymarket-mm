@@ -3,6 +3,7 @@
 #include "network/http_client.hpp"
 #include "network/websocket_client.hpp"
 #include "strategy/order_manager.hpp"
+#include "utils/logger.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -20,15 +21,13 @@ void signalHandler(int signal) {
 
 int main() {
     std::signal(SIGINT, signalHandler);
-    
-    std::cout << "========================================\n";
-    std::cout << "  POLYMARKET MARKET MAKER\n";
-    std::cout << "========================================\n\n";
+    Logger::init("./logs", "polymarket_mm");
     
     std::cout << "Trading mode:\n";
     std::cout << "  1. Paper Trading (simulated)\n";
     std::cout << "  2. Live Trading (real money!)\n";
     std::cout << "Choice: ";
+
     int mode_choice;
     std::cin >> mode_choice;
     std::cin.ignore();
@@ -71,7 +70,7 @@ int main() {
     }
     
     if (events.empty()) {
-        std::cerr << "No events found! Exiting.\n";
+        LOG_ERROR("No events found! Exiting.\n");
         return 1;
     }
 
@@ -93,14 +92,13 @@ int main() {
     std::cin >> selection;
     
     if (selection >= events.size()) {
-        std::cerr << "Invalid selection\n";
+        LOG_ERROR("Invalid selection\n");
         return 1;
     }
     
     const EventInfo& selected_event = events[selection];
     
-    std::cout << "\n>>> Registering " << selected_event.markets.size() << " markets for event: " 
-              << selected_event.title << "\n";
+    LOG_INFO("\n>>> Registering {} markets for event: {}", selected_event.markets.size(), selected_event.title);
     
     std::vector<TokenId> all_tokens;
     for (const auto& market : selected_event.markets) {
@@ -115,26 +113,23 @@ int main() {
         }
     }
 
-    std::cout << "Markets registered: " << all_tokens.size() << " tokens total.\n";
+    LOG_INFO("Markets registered: {} tokens total.", all_tokens.size());
     
     strategy.start();
     strategy.startLogging(selected_event.title);
 
-    std::cout << "\n>>> Connecting to Polymarket WebSocket...\n";
+    LOG_INFO("\n>>> Connecting to Polymarket WebSocket...\n");
     PolymarketWebSocketClient ws_client(queue);
     ws_client.connect();
     
     std::this_thread::sleep_for(std::chrono::seconds(1));
     
-    std::cout << ">>> Subscribing to " << all_tokens.size() << " tokens...\n";
+    LOG_INFO(">>> Subscribing to {} tokens...", all_tokens.size());
     ws_client.subscribe(all_tokens);
     
-    std::cout << "\n========================================\n";
-    std::cout << "  PAPER TRADING ACTIVE\n";
-    std::cout << "  Event: " << selected_event.title << "\n";
-    std::cout << "  Markets: " << selected_event.markets.size() << "\n";
-    std::cout << "  Press Ctrl+C to stop\n";
-    std::cout << "========================================\n\n";
+    LOG_INFO("  PAPER TRADING ACTIVE");
+    LOG_INFO("  Event: {}", selected_event.title);
+    LOG_INFO("  Markets: {}", selected_event.markets.size());
 
     std::thread status_thread([&]() {
         int seconds = 0;
@@ -147,13 +142,14 @@ int main() {
                 auto pnl = strategy.getTotalPnL();
                 auto unrealized_pnl = strategy.getUnrealizedPnL();
                 
-                std::cout << "\n[STATUS] Runtime: " << seconds << "s | "
-                        << "Queue: " << queue.size() << " | "
-                        << "Markets: " << all_tokens.size() << " | "
-                        << "Positions: " << positions << " | "
-                        << "Orders: " << active_orders << " | "
-                        << "PnL: $" << std::fixed << std::setprecision(2) << pnl 
-                        << " (Unrealized: $" << unrealized_pnl << ")\n";
+                LOG_INFO("\n[STATUS] Runtime: {}s | Queue: {} | Markets: {} | Positions: {} | Orders: {} | PnL: ${:.2f}",
+                         seconds,
+                         queue.size(),
+                         all_tokens.size(),
+                         positions,
+                         active_orders,
+                         pnl,
+                         unrealized_pnl);
         
             }
         }
@@ -163,14 +159,13 @@ int main() {
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
     
-    std::cout << "\nShutting down...\n";
+    LOG_INFO("Shutting down...");
     ws_client.disconnect();
     strategy.stop();
     
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
-    std::cout << "\n=== Session Complete ===\n";
-    std::cout << "Logs saved to: ./logs/\n";
-    std::cout << "Goodbye!\n";
+    LOG_INFO("Logs saved to: ./logs/");
+    LOG_INFO("Goodbye!");
     return 0;
 }
