@@ -16,10 +16,10 @@ MarketMaker::MarketMaker(double spread_pct, double max_position)
       last_mid_(0.0),
       last_update_time_(std::chrono::steady_clock::now()) {
     
-    LOG_INFO("MarketMaker initialized: spread={}, max_pos={}, gamma={}, sigma={}", spread_pct, max_position, risk_aversion_, volatility_);
+    LOG_DEBUG("MarketMaker initialized: spread={}, max_pos={}, gamma={}, sigma={}", spread_pct, max_position, risk_aversion_, volatility_);
 }
 
-std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
+std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book, double spread_multiplier) {
     Price mid = book.getMid();
     Price market_spread = book.getSpread();
     
@@ -35,11 +35,18 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
     last_update_time_ = std::chrono::steady_clock::now();
     
     if (market_spread < 0.01) {
-        LOG_INFO("Market spread too tight ({}), not quoting", market_spread);
+        LOG_DEBUG("Market spread too tight ({}), not quoting", market_spread);
         return std::nullopt;
     }
     
-    double target_spread_dollars = mid * spread_pct_;
+    // Apply adverse selection adjustment to spread
+    double adjusted_spread_pct = spread_pct_ * spread_multiplier;
+    double target_spread_dollars = mid * adjusted_spread_pct;
+    
+    if (spread_multiplier > 1.1) {
+        LOG_DEBUG("AS-adjusted spread: {:.1f}bps (base: {:.1f}bps, mult: {:.2f}x)", 
+                 adjusted_spread_pct * 10000, spread_pct_ * 10000, spread_multiplier);
+    }
 
     double q = inventory_ / 100.0; // Normalize inventory
     double gamma = risk_aversion_;
@@ -48,12 +55,12 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
     double reservation_bid = mid - (q + 1.0) * gamma * sigma_sq;
     double reservation_ask = mid + (q - 1.0) * gamma * sigma_sq;
 
-    LOG_DEBUG("  AV calculation:");
-    LOG_DEBUG("    q (normalized inventory): {}", q);
-    LOG_DEBUG("    gamma: {}, sigma: {}", gamma, volatility_);
-    LOG_DEBUG("    reservation_bid: {}", reservation_bid);
-    LOG_DEBUG("    reservation_ask: {}", reservation_ask);
-    LOG_DEBUG("    target_spread: {}", target_spread_dollars);
+    LOG_DEBUG("AV calculation:");
+    LOG_DEBUG("q (normalized inventory): {}", q);
+    LOG_DEBUG("gamma: {}, sigma: {}", gamma, volatility_);
+    LOG_DEBUG("reservation_bid: {}", reservation_bid);
+    LOG_DEBUG("reservation_ask: {}", reservation_ask);
+    LOG_DEBUG("target_spread: {}", target_spread_dollars);
     Price our_bid = reservation_bid - target_spread_dollars / 2.0;
     Price our_ask = reservation_ask + target_spread_dollars / 2.0;
         
@@ -63,7 +70,7 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
     our_bid += imbalance_adjustment;
     our_ask += imbalance_adjustment;
     
-    LOG_DEBUG("    imbalance: {}  adjustment: {}", imbalance, imbalance_adjustment);
+    LOG_DEBUG("imbalance: {}  adjustment: {}", imbalance, imbalance_adjustment);
     
     our_bid = roundToCent(our_bid);
     our_ask = roundToCent(our_ask);
@@ -88,7 +95,7 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
         double min_ask = avg_cost_ * (1.0 + min_profit_pct);
         
         if (our_ask < min_ask) {
-            LOG_DEBUG("    Adjusting ask from {} to {} (avg_cost: {}, urgency: {:.1f}%, inv_risk: {:.1f}%, min_profit: {:.2f}%)", 
+            LOG_DEBUG("Adjusting ask from {} to {} (avg_cost: {}, urgency: {:.1f}%, inv_risk: {:.1f}%, min_profit: {:.2f}%)", 
                      our_ask, min_ask, avg_cost_, time_urgency * 100, inventory_risk * 100, min_profit_pct * 100);
             our_ask = min_ask;
         }
@@ -100,12 +107,12 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
     
 
     if (our_ask <= our_bid) {
-        LOG_INFO("Quotes collapsed after clipping (bid={}, ask={}), not quoting", our_bid, our_ask);
+        LOG_DEBUG("Quotes collapsed after clipping (bid={}, ask={}), not quoting", our_bid, our_ask);
         return std::nullopt;
     }
 
     if (our_bid >= book.getBestAsk() || our_ask <= book.getBestBid()) {
-        LOG_INFO("Our quotes would cross the market, not quoting");
+        LOG_DEBUG("Our quotes would cross the market, not quoting");
         return std::nullopt;
     }
     
@@ -114,15 +121,31 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book) {
     Size quote_size = std::min(100.0, remaining_capacity / mid);
 
     if (quote_size < 10.0) {
-        LOG_INFO("Near max position (remaining: ${}), not quoting", remaining_capacity);
+        LOG_WARN("Near max position (remaining: ${}), not quoting", remaining_capacity);
         return std::nullopt;
     }
 
     Quote quote{our_bid, quote_size, our_ask, quote_size};
     
-    LOG_INFO("Generated quote: Bid {} x {} / Ask {} x {} (inventory: {})", our_bid, quote_size, our_ask, quote_size, inventory_);
+    LOG_DEBUG("Generated quote: Bid {} x {} / Ask {} x {} (inventory: {})", our_bid, quote_size, our_ask, quote_size, inventory_);
     
     return quote;
+}
+
+void MarketMaker::restoreState(double inventory, double avg_cost, double realized_pnl) {
+    inventory_ = inventory;
+    avg_cost_ = avg_cost;
+    realized_pnl_ = realized_pnl;
+    
+    // Calculate inventory_dollars based on restored position
+    if (inventory != 0.0) {
+        inventory_dollars_ = inventory * avg_cost;
+    } else {
+        inventory_dollars_ = 0.0;
+    }
+    
+    LOG_DEBUG("MarketMaker state restored: inventory={}, avg_cost={}, realized_pnl={}, inventory_dollars={}",
+             inventory_, avg_cost_, realized_pnl_, inventory_dollars_);
 }
 
 void MarketMaker::updateInventory(Side side, Size filled_size, Price fill_price) {
@@ -176,7 +199,7 @@ void MarketMaker::updateInventory(Side side, Size filled_size, Price fill_price)
         }
     }
     
-    LOG_INFO("  Inventory: {} shares (${}), Realized P&L: ${}", inventory_, inventory_dollars_, realized_pnl_);
+    LOG_INFO("  Inventory: {} shares (${:.2f}), Realized PnL: ${:.2f}", inventory_, inventory_dollars_, realized_pnl_);
 }
 
 void MarketMaker::updateVolatility(Price old_mid, Price new_mid, double time_elapsed_seconds) {
@@ -199,6 +222,14 @@ void MarketMaker::updateVolatility(Price old_mid, Price new_mid, double time_ela
         LOG_DEBUG("  Volatility updated: {}", volatility_);
         last_logged_vol = volatility_;
     }
+}
+
+double MarketMaker::getUnrealizedPnL(Price current_mid) const {
+    if (std::abs(inventory_) < 0.001) {
+        return 0.0;
+    }
+    
+    return inventory_ * (current_mid - avg_cost_);
 }
 
 Price MarketMaker::roundToCent(Price price) {

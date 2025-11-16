@@ -27,7 +27,8 @@ add_library(pmm_core
     src/data/order_book.cpp
     src/strategy/strategy_engine.cpp
     src/strategy/market_maker.cpp
-    src/strategy/order_manager.cpp  
+    src/strategy/order_manager.cpp
+    src/strategy/adverse_selection.cpp
     src/network/http_client.cpp
     src/network/websocket_client.cpp
     src/utils/state_persistence.cpp

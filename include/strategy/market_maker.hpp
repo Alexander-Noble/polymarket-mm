@@ -17,13 +17,17 @@ class MarketMaker {
 public:
     MarketMaker(double spread_pct = 0.02, double max_position = 1000.0);
     
-    std::optional<Quote> generateQuote(const OrderBook& book);
+    std::optional<Quote> generateQuote(const OrderBook& book, double spread_multiplier = 1.0);
     
     void updateInventory(Side side, Size filled_size, Price fill_price);
+    
+    // Restore state from persistence
+    void restoreState(double inventory, double avg_cost, double realized_pnl);
     
     double getInventory() const { return inventory_; }
     double getInventoryDollars() const { return inventory_dollars_; }
     double getRealizedPnL() const { return realized_pnl_; }
+    double getUnrealizedPnL(Price current_mid) const;
     
     void updateVolatility(Price old_mid, Price new_mid, double time_elapsed_seconds);
     

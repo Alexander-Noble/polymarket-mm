@@ -45,7 +45,7 @@ OrderId OrderManager::placeOrder(const TokenId& token_id, Side side, Price price
     }
 
     if (trading_mode_ == TradingMode::PAPER) {
-        LOG_INFO("[PAPER] Order placed: {} - {} {} @ {}", order_id, (side == Side::BUY ? "BUY" : "SELL"), size, price);
+        LOG_DEBUG("[PAPER] Order placed: {} - {} {} @ {}", order_id, (side == Side::BUY ? "BUY" : "SELL"), size, price);
     } else {
         LOG_INFO("[LIVE] Placing order: {} - {} {} @ {}", order_id, (side == Side::BUY ? "BUY" : "SELL"), size, price);
         placeOrderLive(order);
@@ -69,7 +69,7 @@ bool OrderManager::cancelOrder(const OrderId& order_id, const std::string& marke
     }
 
     if (trading_mode_ == TradingMode::PAPER) {
-        LOG_INFO("[PAPER] Order cancelled: {}", order_id);
+        LOG_DEBUG("[PAPER] Order cancelled: {}", order_id);
         orders_.erase(it);
     } else {
         LOG_INFO("[LIVE] Cancelling order: {}", order_id);
@@ -201,6 +201,26 @@ std::vector<Order> OrderManager::getOpenOrders(const TokenId& token_id) const {
 
 size_t OrderManager::getOpenOrderCount() const {
     return orders_.size();
+}
+
+size_t OrderManager::getBidCount() const {
+    size_t count = 0;
+    for (const auto& [_, order] : orders_) {
+        if (order.side == Side::BUY) {
+            count++;
+        }
+    }
+    return count;
+}
+
+size_t OrderManager::getAskCount() const {
+    size_t count = 0;
+    for (const auto& [_, order] : orders_) {
+        if (order.side == Side::SELL) {
+            count++;
+        }
+    }
+    return count;
 }
 
 // Stubs for live trading (to be implemented)

@@ -33,6 +33,8 @@ public:
     std::vector<Order> getOpenOrders(const TokenId& token_id) const;
     size_t getOpenOrderCount() const;
     size_t getActiveOrderCount() const { return getOpenOrderCount(); }
+    size_t getBidCount() const;
+    size_t getAskCount() const;
 
     void setTradingMode(TradingMode mode);
     TradingMode getTradingMode() const { return trading_mode_; }

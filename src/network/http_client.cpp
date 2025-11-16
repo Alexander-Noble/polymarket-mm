@@ -156,7 +156,7 @@ std::vector<EventInfo> PolymarketHttpClient::getActiveEvents(int limit) {
                         + "&archived=false"
                         + "&end_date_min=" + std::string(now_str)      // Ends after now (not expired)
                         + "&start_date_max=" + std::string(week_str)   // Starts within 7 days
-                        + "&order=volume"                               // Sort by volume
+                        + "&order=volume"                            // Sort by volume
                         + "&ascending=false";   
     while (true) {
         auto paged_endpoint = endpoint+ "&offset=" + std::to_string(offset);   
@@ -173,7 +173,9 @@ std::vector<EventInfo> PolymarketHttpClient::getActiveEvents(int limit) {
         
         all_events.insert(all_events.end(), batch.begin(), batch.end());
         
-        LOG_INFO("Fetched {} events (total: {})", batch.size(), all_events.size());
+        if (offset % 500 == 0) {
+            LOG_DEBUG("Fetched {} events (total: {})", batch.size(), all_events.size());
+        }
         
         if (batch.size() < limit) {
             break;

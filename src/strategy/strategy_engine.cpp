@@ -1,6 +1,8 @@
 #include "strategy/strategy_engine.hpp"
 #include "utils/logger.hpp"
 #include <iostream>
+#include <unordered_set>
+#include <algorithm>
 
 namespace pmm {
 
@@ -8,9 +10,34 @@ StrategyEngine::StrategyEngine(EventQueue& queue, TradingMode mode)
     : event_queue_(queue),
     state_persistence_(std::make_unique<StatePersistence>("./state.json")),
     trading_logger_(std::make_unique<TradingLogger>("./logs")),
+    as_manager_(std::make_unique<AdverseSelectionManager>(0.02)),
     order_manager_(queue, mode, trading_logger_.get()),
     running_(false) {
     LOG_INFO("StrategyEngine initialized");
+    
+    // Load previous state if available
+    LOG_INFO("Attempting to load previous trading state...");
+    TradingState loaded_state = state_persistence_->loadState();
+    
+    if (!loaded_state.positions.empty()) {
+        LOG_INFO("Restoring {} positions from previous session", loaded_state.positions.size());
+        std::lock_guard<std::mutex> lock(positions_mutex_);
+        
+        for (const auto& [token_id, pos_state] : loaded_state.positions) {
+            Position pos;
+            pos.quantity = pos_state.quantity;
+            pos.avg_entry_price = pos_state.avg_cost;
+            pos.realized_pnl = pos_state.realized_pnl;
+            positions_[token_id] = pos;
+            
+            LOG_INFO("  Restored position: {} | Qty: {:.2f} @ {:.3f} | Realized PnL: ${:.2f}",
+                     token_id, pos.quantity, pos.avg_entry_price, pos.realized_pnl);
+        }
+        
+        LOG_INFO("Total realized PnL from previous sessions: ${:.2f}", loaded_state.total_realized_pnl);
+    } else {
+        LOG_INFO("No previous positions to restore - starting fresh");
+    }
 }
 
 StrategyEngine::~StrategyEngine() {
@@ -83,6 +110,9 @@ void StrategyEngine::run() {
         auto now = std::chrono::steady_clock::now();
         if (now - last_snapshot > std::chrono::seconds(60)) {
             snapshotPositions();
+            checkPendingFillMetrics();
+            logQuoteSummary();
+            as_manager_->decay();  // Decay adverse selection adjustments
             last_snapshot = now;
         }
     }
@@ -98,8 +128,7 @@ void StrategyEngine::handleBookSnapshot(const Event& event) {
     if (it != market_metadata_.end()) {
         market_name = it->second.title + " - " + it->second.outcome;
     }
-    LOG_INFO("Processing book snapshot for {}", market_name);
-    LOG_INFO("       Bids: {} levels | Asks: {} levels", payload.bids.size(), payload.asks.size());
+    LOG_DEBUG("Book snapshot for {}: {} bids, {} asks", market_name, payload.bids.size(), payload.asks.size());
         
     OrderBook& book = getOrCreateOrderBook(payload.token_id, market_name);
     book.clear();
@@ -127,8 +156,7 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
     auto market_name = market_metadata_.find(token_id) != market_metadata_.end() ?
                        market_metadata_[token_id].title + " - " + market_metadata_[token_id].outcome :
                        token_id;
-    LOG_INFO("Processing price update for {}", market_name);
-    LOG_INFO("       Bids: {} levels | Asks: {} levels", payload.bids.size(), payload.asks.size());
+    LOG_DEBUG("Price update for {}: {} bids, {} asks", market_name, payload.bids.size(), payload.asks.size());
 
     OrderBook& book = getOrCreateOrderBook(token_id, market_name);
     
@@ -143,6 +171,9 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
               book.getBestBid(),
               book.getBestAsk());
 
+    // Update adverse selection metrics with current price
+    as_manager_->updateMetrics(token_id, book.getMid());
+
     calculateQuotes(token_id, market_name);
 }
 
@@ -152,17 +183,50 @@ void StrategyEngine::handleOrderFill(const Event& event) {
                     market_metadata_[payload.token_id].title + " - " + market_metadata_[payload.token_id].outcome :
                     payload.token_id;
     
-    LOG_INFO(">>> FILL EVENT: {}", payload.order_id);
-    LOG_INFO("    Market: {}", market_name);
-    LOG_INFO("    Side: {}", (payload.side == Side::BUY ? "BUY" : "SELL"));
-    LOG_INFO("    Size: {} @ {}", payload.filled_size, payload.fill_price);
+    LOG_INFO("FILL EVENT: {}", payload.order_id);
+    LOG_INFO("Market: {}", market_name);
+    LOG_INFO("Side: {}", (payload.side == Side::BUY ? "BUY" : "SELL"));
+    LOG_INFO("Size: {} @ {}", payload.filled_size, payload.fill_price);
+    
+    // Capture market context at fill time
+    auto ob_it = order_books_.find(payload.token_id);
+    if (ob_it != order_books_.end()) {
+        const auto& book = ob_it->second;
+        double spread_bps = (book.getSpread() / book.getMid()) * 10000;
+        double imbalance = book.getImbalance();
+        
+        LOG_INFO("Market context: spread={:.1f}bps, imbalance={:.2f}, mid={:.3f}", 
+                 spread_bps, imbalance, book.getMid());
+        
+        // Store fill metrics for adverse selection analysis
+        auto mm_it = market_makers_.find(payload.token_id);
+        double inventory_before = mm_it != market_makers_.end() ? mm_it->second.getInventory() : 0.0;
+        
+        FillMetrics metrics;
+        metrics.fill_time = std::chrono::system_clock::now();
+        metrics.token_id = payload.token_id;
+        metrics.order_id = payload.order_id;
+        metrics.side = payload.side;
+        metrics.fill_price = payload.fill_price;
+        metrics.mid_at_fill = book.getMid();
+        metrics.best_bid_at_fill = book.getBestBid();
+        metrics.best_ask_at_fill = book.getBestAsk();
+        metrics.spread_at_fill = book.getSpread();
+        metrics.imbalance_at_fill = imbalance;
+        metrics.inventory_before = inventory_before;
+        
+        std::lock_guard<std::mutex> lock(fill_metrics_mutex_);
+        fill_history_.push_back(metrics);
+    }
 
+    total_fills_.fetch_add(1, std::memory_order_relaxed);
+    
     updatePosition(payload.token_id, payload.filled_size, payload.fill_price, payload.side);
     
     {
         std::lock_guard<std::mutex> lock(positions_mutex_);
         auto& pos = positions_[payload.token_id];
-        LOG_INFO("    New position: {} @ avg {} | Realized PnL: ${}", pos.quantity, pos.avg_entry_price, pos.realized_pnl);
+        LOG_INFO("New position: {} @ avg {} | Realized PnL: ${}", pos.quantity, pos.avg_entry_price, pos.realized_pnl);
     }
     
     auto mm_it = market_makers_.find(payload.token_id);
@@ -172,15 +236,36 @@ void StrategyEngine::handleOrderFill(const Event& event) {
             payload.filled_size,
             payload.fill_price
         );
+        
+        // Log PnL breakdown
+        auto ob_it = order_books_.find(payload.token_id);
+        if (ob_it != order_books_.end() && ob_it->second.getMid() > 0) {
+            double realized = mm_it->second.getRealizedPnL();
+            double unrealized = mm_it->second.getUnrealizedPnL(ob_it->second.getMid());
+            LOG_INFO("  PnL: Realized: ${:.2f}, Unrealized: ${:.2f}, Total: ${:.2f}", 
+                     realized, unrealized, realized + unrealized);
+        }
+        
+        // Update fill metrics with inventory after
+        std::lock_guard<std::mutex> lock(fill_metrics_mutex_);
+        if (!fill_history_.empty()) {
+            fill_history_.back().inventory_after = mm_it->second.getInventory();
+        }
+        
+        // Record fill for adverse selection tracking
+        auto book_it = order_books_.find(payload.token_id);
+        if (book_it != order_books_.end()) {
+            as_manager_->recordFill(
+                payload.token_id,
+                payload.order_id,
+                payload.side,
+                payload.fill_price,
+                book_it->second.getMid(),
+                fill_history_.back().inventory_before
+            );
+        }
     }
-
-    auto& book = order_books_[payload.token_id];
-    double spread_bps = (book.getSpread() / book.getMid()) * 10000;
-    double imbalance = book.getImbalance();
-
-    LOG_INFO("  Market context: spread={:.1f}bps, imbalance={:.2f}, our_inventory={}", 
-         spread_bps, imbalance, mm_it->second.getInventory());
-
+    
     if (trading_logger_) {
         trading_logger_->logOrderFilled(
             market_name,
@@ -223,8 +308,30 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
         0.02,      // spread
         1000.0     // risk_aversion
     ).first;
+
+    // Restore inventory from persisted state if available (only on first quote)
+    static std::unordered_set<TokenId> restored_markets;
+    if (restored_markets.find(token_id) == restored_markets.end()) {
+        std::lock_guard<std::mutex> lock(positions_mutex_);
+        auto pos_it = positions_.find(token_id);
+        if (pos_it != positions_.end() && std::abs(pos_it->second.quantity) > 0.001) {
+            mm_it->second.restoreState(
+                pos_it->second.quantity,
+                pos_it->second.avg_entry_price,
+                pos_it->second.realized_pnl
+            );
+            LOG_DEBUG("Restored MarketMaker inventory for token: {}", token_id);
+        }
+        restored_markets.insert(token_id);
+    }
     
-    auto quote_opt = mm_it->second.generateQuote(book);
+    // Get adverse selection spread multiplier
+    double inventory = mm_it->second.getInventory();
+    double bid_multiplier = as_manager_->getSpreadMultiplier(token_id, Side::BUY, inventory);
+    double ask_multiplier = as_manager_->getSpreadMultiplier(token_id, Side::SELL, inventory);
+    double spread_multiplier = std::max(bid_multiplier, ask_multiplier);  // Use worst case
+    
+    auto quote_opt = mm_it->second.generateQuote(book, spread_multiplier);
     
     if (quote_opt.has_value()) {
         const Quote& quote = quote_opt.value();
@@ -242,13 +349,24 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
             }
         }
         
+        // Always update active_quotes_ with current state (prices and inventory)
+        {
+            std::lock_guard<std::mutex> lock(quotes_mutex_);
+            QuoteSummary summary;
+            summary.market_name = market_name;
+            summary.bid_price = quote.bid_price;
+            summary.ask_price = quote.ask_price;
+            summary.mid = book.getMid();
+            summary.spread_bps = (quote.ask_price - quote.bid_price) / book.getMid() * 10000;
+            summary.inventory = mm_it->second.getInventory();
+            summary.last_update = std::chrono::steady_clock::now();
+            active_quotes_[token_id] = summary;
+        }
+        
         if (has_matching_bid && has_matching_ask) {
-            LOG_INFO("  Orders already at target prices, no update needed");
             return;
         }
-        LOG_INFO("\n  PLACING ORDERS:");
-        LOG_INFO("  BID: {} x {}", quote.bid_price, quote.bid_size);
-        LOG_INFO("  ASK: {} x {}", quote.ask_price, quote.ask_size);
+        LOG_DEBUG("[{}] Bid {} x {} / Ask {} x {}", market_name, quote.bid_price, quote.bid_size, quote.ask_price, quote.ask_size);
         
         order_manager_.cancelAllOrders(token_id, market_name);
         
@@ -288,6 +406,55 @@ size_t StrategyEngine::getPositionCount() const {
 
 size_t StrategyEngine::getActiveOrderCount() const {
     return order_manager_.getActiveOrderCount();
+}
+
+size_t StrategyEngine::getBidCount() const {
+    return order_manager_.getBidCount();
+}
+
+size_t StrategyEngine::getAskCount() const {
+    return order_manager_.getAskCount();
+}
+
+size_t StrategyEngine::getActiveMarketCount() const {
+    // Count unique markets (by market_id) that have orders on any token
+    std::unordered_set<std::string> active_market_ids;
+    
+    for (const auto& [token_id, metadata] : market_metadata_) {
+        auto orders = order_manager_.getOpenOrders(token_id);
+        if (!orders.empty()) {
+            active_market_ids.insert(metadata.market_id);
+        }
+    }
+    
+    return active_market_ids.size();
+}
+
+double StrategyEngine::getTotalInventory() const {
+    std::lock_guard<std::mutex> lock(positions_mutex_);
+    double total = 0.0;
+    for (const auto& [token_id, position] : positions_) {
+        total += std::abs(position.quantity);
+    }
+    return total;
+}
+
+double StrategyEngine::getAverageSpread() const {
+    double total_spread = 0.0;
+    int count = 0;
+    
+    for (const auto& [token_id, book] : order_books_) {
+        if (book.hasValidBBO()) {
+            total_spread += book.getSpread();
+            count++;
+        }
+    }
+    
+    return (count > 0) ? (total_spread / count) : 0.0;
+}
+
+size_t StrategyEngine::getFillCount() const {
+    return total_fills_.load(std::memory_order_relaxed);
 }
 
 double StrategyEngine::getTotalPnL() const {
@@ -399,6 +566,167 @@ void StrategyEngine::snapshotPositions() {
                                         pos.avg_entry_price, market_value, unrealized_pnl);
         }
     }
+}
+
+void StrategyEngine::checkPendingFillMetrics() {
+    std::lock_guard<std::mutex> lock(fill_metrics_mutex_);
+    
+    auto now = std::chrono::system_clock::now();
+    
+    for (auto& metrics : fill_history_) {
+        if (metrics.metrics_complete) continue;
+        
+        auto time_since_fill = std::chrono::duration_cast<std::chrono::seconds>(now - metrics.fill_time).count();
+        
+        // Get current mid price
+        auto ob_it = order_books_.find(metrics.token_id);
+        if (ob_it == order_books_.end() || !ob_it->second.hasValidBBO()) continue;
+        
+        Price current_mid = ob_it->second.getMid();
+        
+        // Capture at 30s
+        if (time_since_fill >= 30 && metrics.mid_30s_after == 0.0) {
+            metrics.mid_30s_after = current_mid;
+            
+            double price_change_30s = (current_mid - metrics.mid_at_fill) / metrics.mid_at_fill * 100;
+            double adverse_metric_30s = (metrics.side == Side::BUY) 
+                ? (current_mid - metrics.fill_price)  // Positive = good, negative = adverse
+                : (metrics.fill_price - current_mid); // Positive = good, negative = adverse
+            
+            LOG_INFO("[FILL ANALYSIS 30s] Order: {} | Side: {} | Fill: {:.3f} | Mid@Fill: {:.3f} | Mid@30s: {:.3f} | Change: {:.2f}% | Metric: {:.4f}",
+                     metrics.order_id,
+                     metrics.side == Side::BUY ? "BUY" : "SELL",
+                     metrics.fill_price,
+                     metrics.mid_at_fill,
+                     current_mid,
+                     price_change_30s,
+                     adverse_metric_30s);
+        }
+        
+        // Capture at 60s and mark complete
+        if (time_since_fill >= 60 && metrics.mid_60s_after == 0.0) {
+            metrics.mid_60s_after = current_mid;
+            metrics.metrics_complete = true;
+            
+            double price_change_60s = (current_mid - metrics.mid_at_fill) / metrics.mid_at_fill * 100;
+            double adverse_metric_60s = (metrics.side == Side::BUY) 
+                ? (current_mid - metrics.fill_price)
+                : (metrics.fill_price - current_mid);
+            
+            bool is_adverse = adverse_metric_60s < -0.01; // Lost more than 1 cent
+            
+            LOG_INFO("[FILL ANALYSIS 60s] Order: {} | Side: {} | Fill: {:.3f} | Mid@Fill: {:.3f} | Mid@60s: {:.3f} | Change: {:.2f}% | Metric: {:.4f} | Adverse: {}",
+                     metrics.order_id,
+                     metrics.side == Side::BUY ? "BUY" : "SELL",
+                     metrics.fill_price,
+                     metrics.mid_at_fill,
+                     current_mid,
+                     price_change_60s,
+                     adverse_metric_60s,
+                     is_adverse ? "YES" : "NO");
+            
+            // Log detailed context for adverse fills
+            if (is_adverse) {
+                LOG_WARN("ADVERSE SELECTION DETECTED!");
+                LOG_WARN("Spread@Fill: {:.4f} ({:.1f}bps)", metrics.spread_at_fill, 
+                         (metrics.spread_at_fill / metrics.mid_at_fill) * 10000);
+                LOG_WARN("Imbalance@Fill: {:.2f}", metrics.imbalance_at_fill);
+                LOG_WARN("Inventory: {:.1f} -> {:.1f}", metrics.inventory_before, metrics.inventory_after);
+            }
+        }
+    }
+    
+    // Clean up old completed metrics (keep last 100)
+    if (fill_history_.size() > 100) {
+        auto first_incomplete = std::find_if(fill_history_.begin(), fill_history_.end(),
+                                            [](const FillMetrics& m) { return !m.metrics_complete; });
+        
+        if (first_incomplete != fill_history_.begin() && 
+            std::distance(fill_history_.begin(), first_incomplete) > 50) {
+            fill_history_.erase(fill_history_.begin(), first_incomplete - 50);
+        }
+    }
+}
+
+void StrategyEngine::logQuoteSummary() {
+    std::lock_guard<std::mutex> lock(quotes_mutex_);
+        
+    // Build list including both active quotes and markets with positions
+    std::vector<std::pair<TokenId, QuoteSummary>> sorted_quotes;
+    for (const auto& [token_id, summary] : active_quotes_) {
+        sorted_quotes.push_back({token_id, summary});
+    }
+    
+    // Add markets with positions that aren't actively quoting
+    for (const auto& [token_id, mm] : market_makers_) {
+        double inventory = mm.getInventory();
+        if (std::abs(inventory) > 0.1 && active_quotes_.find(token_id) == active_quotes_.end()) {
+            // This market has a position but isn't quoting - add it
+            QuoteSummary summary;
+            auto meta_it = market_metadata_.find(token_id);
+            summary.market_name = (meta_it != market_metadata_.end()) ? 
+                                  meta_it->second.title + " - " + meta_it->second.outcome : 
+                                  token_id;
+            
+            auto ob_it = order_books_.find(token_id);
+            if (ob_it != order_books_.end()) {
+                summary.mid = ob_it->second.getMid();
+                summary.bid_price = 0.0;
+                summary.ask_price = 0.0;
+                summary.spread_bps = 0.0;
+            } else {
+                summary.mid = 0.0;
+                summary.bid_price = 0.0;
+                summary.ask_price = 0.0;
+                summary.spread_bps = 0.0;
+            }
+            summary.inventory = inventory;
+            sorted_quotes.push_back({token_id, summary});
+        }
+    }
+    
+    if (sorted_quotes.empty()) {
+        return;
+    }
+    
+    std::sort(sorted_quotes.begin(), sorted_quotes.end(),
+              [](const auto& a, const auto& b) {
+                  return std::abs(a.second.inventory) > std::abs(b.second.inventory);
+              });
+    
+    // Show top 5 by inventory risk
+    LOG_INFO("Top markets by inventory:");
+    size_t count = 0;
+    for (const auto& [token_id, summary] : sorted_quotes) {
+        if (count++ >= 5) break;
+        if (summary.bid_price > 0 && summary.ask_price > 0) {
+            LOG_INFO("  {} | Mid: {:.3f} | Bid: {:.3f} / Ask: {:.3f} | Spread: {:.1f}bps | Inv: {:.1f}",
+                     summary.market_name, summary.mid, summary.bid_price, summary.ask_price,
+                     summary.spread_bps, summary.inventory);
+        } else {
+            LOG_INFO("  {} | Mid: {:.3f} | NOT QUOTING | Inv: {:.1f}",
+                     summary.market_name, summary.mid, summary.inventory);
+        }
+    }
+    
+    // Calculate aggregate stats (only from active quotes)
+    double avg_spread_bps = 0.0;
+    double total_inv = 0.0;
+    if (!active_quotes_.empty()) {
+        for (const auto& [token_id, summary] : active_quotes_) {
+            avg_spread_bps += summary.spread_bps;
+            total_inv += std::abs(summary.inventory);
+        }
+        avg_spread_bps /= active_quotes_.size();
+    }
+    
+    // Total inventory across all markets
+    double total_abs_inv = 0.0;
+    for (const auto& [token_id, mm] : market_makers_) {
+        total_abs_inv += std::abs(mm.getInventory());
+    }
+    
+    LOG_INFO("Avg spread: {:.1f}bps | Total |inventory|: {:.1f}", avg_spread_bps, total_abs_inv);
 }
 
 } // namespace pmm
