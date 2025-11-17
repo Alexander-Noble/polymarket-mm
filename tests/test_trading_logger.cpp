@@ -135,7 +135,9 @@ TEST_F(TradingLoggerTest, LogOrderFilled) {
 TEST_F(TradingLoggerTest, LogPosition) {
     logger->startSession("Test Event");
     
-    logger->logPosition("MARKET_004", "TOKEN_GHI", 500.0, 0.52, 260.0, 10.0);
+    auto opened_time = std::chrono::system_clock::now();
+    auto updated_time = std::chrono::system_clock::now();
+    logger->logPosition("MARKET_004", "TOKEN_GHI", 500.0, 0.52, opened_time, updated_time, Side::BUY, 3, 260.0);
     
     std::string session_id = logger->getSessionId();
     std::filesystem::path positions_file = std::filesystem::path(test_dir) / session_id / "positions.csv";
@@ -143,8 +145,9 @@ TEST_F(TradingLoggerTest, LogPosition) {
     EXPECT_TRUE(fileContainsString(positions_file, "TOKEN_GHI"));
     EXPECT_TRUE(fileContainsString(positions_file, "500"));
     EXPECT_TRUE(fileContainsString(positions_file, "0.52"));
+    EXPECT_TRUE(fileContainsString(positions_file, "BUY"));
+    EXPECT_TRUE(fileContainsString(positions_file, "3"));
     EXPECT_TRUE(fileContainsString(positions_file, "260"));
-    EXPECT_TRUE(fileContainsString(positions_file, "10"));
 }
 
 TEST_F(TradingLoggerTest, MultipleOrders) {
@@ -243,5 +246,5 @@ TEST_F(TradingLoggerTest, CSVHeadersAreCorrect) {
     
     EXPECT_TRUE(fileContainsString(orders_file, "timestamp,market_id,order_id,token_id,side,price,size,status"));
     EXPECT_TRUE(fileContainsString(fills_file, "timestamp,market_id,order_id,token_id,side,fill_price,fill_size,pnl"));
-    EXPECT_TRUE(fileContainsString(positions_file, "timestamp,market_id,token_id,position,avg_cost,market_value,unrealized_pnl"));
+    EXPECT_TRUE(fileContainsString(positions_file, "timestamp,market_id,token_id,position,avg_cost,opened_at,last_updated,entry_side,num_fills,total_cost"));
 }

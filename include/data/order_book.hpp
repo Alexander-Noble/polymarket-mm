@@ -30,6 +30,9 @@ public:
     Size getTotalAskVolume(int levels = 5) const;
 
     double getImbalance() const;
+    
+    int getBidLevelCount() const;
+    int getAskLevelCount() const;
 };
 
 } // namespace pmm

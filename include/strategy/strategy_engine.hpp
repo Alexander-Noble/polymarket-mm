@@ -45,6 +45,7 @@ public:
     size_t getFillCount() const;        // Total fills since start
 
     void startLogging(const std::string& event_name);
+    void logInitialPositions();
     void snapshotPositions();
     
 private:
@@ -52,6 +53,10 @@ private:
         double quantity = 0.0;
         double avg_entry_price = 0.0;
         double realized_pnl = 0.0;
+        std::chrono::system_clock::time_point opened_at;
+        std::chrono::system_clock::time_point last_updated;
+        Side entry_side = Side::BUY;
+        int num_fills = 0;
     };
 
     struct FillMetrics {
@@ -84,6 +89,13 @@ private:
         std::chrono::steady_clock::time_point last_update;
     };
 
+    struct PriceUpdateHistory {
+        Price last_mid = 0.0;
+        double last_bid_volume = 0.0;
+        double last_ask_volume = 0.0;
+        std::chrono::steady_clock::time_point last_update_time;
+    };
+
     EventQueue& event_queue_;
     std::unique_ptr<StatePersistence> state_persistence_;
     std::unique_ptr<TradingLogger> trading_logger_;
@@ -103,10 +115,15 @@ private:
     std::vector<FillMetrics> fill_history_;
     std::mutex fill_metrics_mutex_;
     std::atomic<size_t> total_fills_{0};
+    std::atomic<bool> initial_positions_logged_{false};
 
     // Quote tracking for summary
     std::unordered_map<TokenId, QuoteSummary> active_quotes_;
     std::mutex quotes_mutex_;
+
+    // Price update history for tracking changes
+    std::unordered_map<TokenId, PriceUpdateHistory> price_history_;
+    std::mutex price_history_mutex_;
 
     void run();
     void checkPendingFillMetrics();

@@ -11,6 +11,7 @@ class Logger {
 public:
     static void init(const std::string& log_dir = "./logs",
                      const std::string& logger_name = "pmm_logger");
+    static void updateSessionDir(const std::string& session_dir, const std::string& session_name);
     static std::shared_ptr<spdlog::logger> get();
     
 private:

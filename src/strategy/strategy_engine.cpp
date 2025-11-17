@@ -23,11 +23,18 @@ StrategyEngine::StrategyEngine(EventQueue& queue, TradingMode mode)
         LOG_INFO("Restoring {} positions from previous session", loaded_state.positions.size());
         std::lock_guard<std::mutex> lock(positions_mutex_);
         
+        auto now = std::chrono::system_clock::now();
+        
         for (const auto& [token_id, pos_state] : loaded_state.positions) {
             Position pos;
             pos.quantity = pos_state.quantity;
             pos.avg_entry_price = pos_state.avg_cost;
             pos.realized_pnl = pos_state.realized_pnl;
+            // Initialize timestamps for restored positions (we don't persist these)
+            pos.opened_at = now;
+            pos.last_updated = now;
+            pos.entry_side = (pos_state.quantity > 0) ? Side::BUY : Side::SELL;
+            pos.num_fills = 0;  // Reset for restored positions
             positions_[token_id] = pos;
             
             LOG_INFO("  Restored position: {} | Qty: {:.2f} @ {:.3f} | Realized PnL: ${:.2f}",
@@ -145,6 +152,25 @@ void StrategyEngine::handleBookSnapshot(const Event& event) {
               book.getBestAsk(),
               book.getSpread());
     
+    // Log initial positions once we have market data for at least one position
+    if (!initial_positions_logged_.load() && !positions_.empty()) {
+        bool has_position_with_book = false;
+        {
+            std::lock_guard<std::mutex> lock(positions_mutex_);
+            for (const auto& [token_id, pos] : positions_) {
+                auto ob_it = order_books_.find(token_id);
+                if (ob_it != order_books_.end() && ob_it->second.hasValidBBO()) {
+                    has_position_with_book = true;
+                    break;
+                }
+            }
+        }
+        
+        if (has_position_with_book) {
+            initial_positions_logged_.store(true);
+            logInitialPositions();
+        }
+    }
     
     order_manager_.updateOrderBook(payload.token_id, book);
     calculateQuotes(payload.token_id, market_name);
@@ -160,6 +186,16 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
 
     OrderBook& book = getOrCreateOrderBook(token_id, market_name);
     
+    // Get previous state before updating
+    PriceUpdateHistory prev_state;
+    {
+        std::lock_guard<std::mutex> lock(price_history_mutex_);
+        auto it = price_history_.find(token_id);
+        if (it != price_history_.end()) {
+            prev_state = it->second;
+        }
+    }
+    
     for (const auto& [price, size] : payload.bids) {
         book.updateBid(price, size);
     }
@@ -173,6 +209,78 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
 
     // Update adverse selection metrics with current price
     as_manager_->updateMetrics(token_id, book.getMid());
+
+    // Calculate and log price update metrics
+    if (book.hasValidBBO() && trading_logger_) {
+        Price current_mid = book.getMid();
+        double price_change_pct = 0.0;
+        double price_change_abs = 0.0;
+        double seconds_since_last = 0.0;
+        
+        auto now = std::chrono::steady_clock::now();
+        
+        if (prev_state.last_mid > 0.0) {
+            price_change_abs = current_mid - prev_state.last_mid;
+            price_change_pct = (price_change_abs / prev_state.last_mid) * 100.0;
+            seconds_since_last = std::chrono::duration<double>(now - prev_state.last_update_time).count();
+        }
+        
+        // Get current volumes
+        double bid_volume = book.getTotalBidVolume(5);
+        double ask_volume = book.getTotalAskVolume(5);
+        double total_volume = bid_volume + ask_volume;
+        double volume_imbalance = book.getImbalance();
+        
+        // Get spread metrics
+        Price spread = book.getSpread();
+        double spread_bps = (spread / current_mid) * 10000.0;
+        
+        // Get level counts
+        int bid_levels = book.getBidLevelCount();
+        int ask_levels = book.getAskLevelCount();
+        
+        // Get our inventory
+        double our_inventory = 0.0;
+        auto mm_it = market_makers_.find(token_id);
+        if (mm_it != market_makers_.end()) {
+            our_inventory = mm_it->second.getInventory();
+        }
+        
+        // Calculate time to event (placeholder - would need actual event time)
+        double time_to_event_hours = -1.0;  // -1 indicates unknown
+        
+        // Log the price update
+        trading_logger_->logPriceUpdate(
+            market_name,
+            token_id,
+            current_mid,
+            price_change_pct,
+            price_change_abs,
+            book.getBestBid(),
+            book.getBestAsk(),
+            spread,
+            spread_bps,
+            bid_volume,
+            ask_volume,
+            total_volume,
+            volume_imbalance,
+            bid_levels,
+            ask_levels,
+            our_inventory,
+            time_to_event_hours,
+            seconds_since_last
+        );
+        
+        // Update price history for next comparison
+        {
+            std::lock_guard<std::mutex> lock(price_history_mutex_);
+            PriceUpdateHistory& history = price_history_[token_id];
+            history.last_mid = current_mid;
+            history.last_bid_volume = bid_volume;
+            history.last_ask_volume = ask_volume;
+            history.last_update_time = now;
+        }
+    }
 
     calculateQuotes(token_id, market_name);
 }
@@ -276,6 +384,15 @@ void StrategyEngine::handleOrderFill(const Event& event) {
             payload.side,
             mm_it->second.getRealizedPnL()
         );
+        
+        // Log position change after fill
+        std::lock_guard<std::mutex> lock(positions_mutex_);
+        auto& pos = positions_[payload.token_id];
+        double total_cost = pos.quantity * pos.avg_entry_price;
+        
+        trading_logger_->logPosition(market_name, payload.token_id, pos.quantity,
+                                    pos.avg_entry_price, pos.opened_at, pos.last_updated,
+                                    pos.entry_side, pos.num_fills, total_cost);
     }
 
     calculateQuotes(payload.token_id, market_name);
@@ -488,6 +605,7 @@ void StrategyEngine::updatePosition(const TokenId& token_id, double qty, double 
     
     auto& pos = positions_[token_id];
     double signed_qty = (side == Side::BUY) ? qty : -qty;
+    bool was_flat = (pos.quantity == 0.0);
     
     // Update position and average entry price
     if ((pos.quantity > 0 && signed_qty > 0) || (pos.quantity < 0 && signed_qty < 0)) {
@@ -502,17 +620,62 @@ void StrategyEngine::updatePosition(const TokenId& token_id, double qty, double 
         
         pos.quantity += signed_qty;
         pos.avg_entry_price = price;
+        
+        // If we went from flat to a new position, record the opened_at time and entry side
+        if (was_flat && pos.quantity != 0.0) {
+            pos.opened_at = std::chrono::system_clock::now();
+            pos.entry_side = side;
+            pos.num_fills = 0;  // Reset fill count for new position
+        }
     } else {
         // Partial close - realize proportional PnL
         double pnl = -signed_qty * (price - pos.avg_entry_price);
         pos.realized_pnl += pnl;
         pos.quantity += signed_qty;
     }
+    
+    // If this is a brand new position (opening from flat), set opened_at and entry_side
+    if (was_flat && pos.quantity != 0.0 && pos.opened_at.time_since_epoch().count() == 0) {
+        pos.opened_at = std::chrono::system_clock::now();
+        pos.entry_side = side;
+        pos.num_fills = 0;  // Reset fill count
+    }
+    
+    // Always update last_updated and increment fill count
+    pos.last_updated = std::chrono::system_clock::now();
+    pos.num_fills++;
 }
 
 void StrategyEngine::startLogging(const std::string& event_name) {
     if (trading_logger_) {
         trading_logger_->startSession(event_name);
+        // Don't log initial positions yet - wait until we have market data
+    }
+}
+
+void StrategyEngine::logInitialPositions() {
+    if (!trading_logger_) return;
+    
+    std::lock_guard<std::mutex> lock(positions_mutex_);
+    
+    if (positions_.empty()) {
+        return;
+    }
+    
+    LOG_INFO("Logging {} initial positions to session", positions_.size());
+    
+    for (const auto& [token_id, pos] : positions_) {
+        double total_cost = pos.quantity * pos.avg_entry_price;
+        
+        std::string market_name = token_id;
+        auto meta_it = market_metadata_.find(token_id);
+        if (meta_it != market_metadata_.end()) {
+            market_name = meta_it->second.title + " - " + meta_it->second.outcome;
+        }
+        
+        trading_logger_->logPosition(market_name, token_id, pos.quantity,
+                                    pos.avg_entry_price, pos.opened_at, pos.last_updated,
+                                    pos.entry_side, pos.num_fills, total_cost);
     }
 }
 
@@ -541,30 +704,6 @@ void StrategyEngine::snapshotPositions() {
         state.total_volume = 0.0;  // TODO: track in strategy
         
         state_persistence_->saveState(state);
-    }
-    
-    // Log positions for audit trail
-    if (trading_logger_) {
-        for (const auto& [token_id, pos] : positions_) {
-            auto ob_it = order_books_.find(token_id);
-            double market_value = 0.0;
-            double unrealized_pnl = 0.0;
-            
-            if (ob_it != order_books_.end() && ob_it->second.getMid() > 0) {
-                double mid = ob_it->second.getMid();
-                market_value = pos.quantity * mid;
-                unrealized_pnl = pos.quantity * (mid - pos.avg_entry_price);
-            }
-            
-            std::string market_name = token_id;
-            auto meta_it = market_metadata_.find(token_id);
-            if (meta_it != market_metadata_.end()) {
-                market_name = meta_it->second.title + " - " + meta_it->second.outcome;
-            }
-            
-            trading_logger_->logPosition(market_name, token_id, pos.quantity, 
-                                        pos.avg_entry_price, market_value, unrealized_pnl);
-        }
     }
 }
 
@@ -711,22 +850,25 @@ void StrategyEngine::logQuoteSummary() {
     
     // Calculate aggregate stats (only from active quotes)
     double avg_spread_bps = 0.0;
-    double total_inv = 0.0;
     if (!active_quotes_.empty()) {
         for (const auto& [token_id, summary] : active_quotes_) {
             avg_spread_bps += summary.spread_bps;
-            total_inv += std::abs(summary.inventory);
         }
         avg_spread_bps /= active_quotes_.size();
     }
+
+    double total_short_inv = 0.0;
+    double total_long_inv = 0.0;
+    double total_inv = 0.0; 
     
-    // Total inventory across all markets
-    double total_abs_inv = 0.0;
     for (const auto& [token_id, mm] : market_makers_) {
-        total_abs_inv += std::abs(mm.getInventory());
+        total_short_inv += std::min(0.0, mm.getInventory());
+        total_long_inv += std::max(0.0, mm.getInventory());
+        total_inv += std::abs(mm.getInventory());
     }
     
-    LOG_INFO("Avg spread: {:.1f}bps | Total |inventory|: {:.1f}", avg_spread_bps, total_abs_inv);
+    LOG_INFO("Avg spread: {:.1f}bps | Total absolute inventory: {:.1f} | Total short inventory: {:.1f} | Total long inventory: {:.1f}",
+             avg_spread_bps, total_inv, total_short_inv, total_long_inv);
 }
 
 } // namespace pmm

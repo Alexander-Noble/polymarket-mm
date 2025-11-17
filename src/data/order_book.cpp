@@ -87,4 +87,12 @@ namespace pmm {
         return (bid_vol - ask_vol) / total;
     }
 
+    int OrderBook::getBidLevelCount() const {
+        return static_cast<int>(bids_.size());
+    }
+
+    int OrderBook::getAskLevelCount() const {
+        return static_cast<int>(asks_.size());
+    }
+
 }
