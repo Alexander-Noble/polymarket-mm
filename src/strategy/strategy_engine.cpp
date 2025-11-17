@@ -246,8 +246,13 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
             our_inventory = mm_it->second.getInventory();
         }
         
-        // Calculate time to event (placeholder - would need actual event time)
+        // Calculate time to event from stored event end time
         double time_to_event_hours = -1.0;  // -1 indicates unknown
+        auto metadata_it = market_metadata_.find(token_id);
+        if (metadata_it != market_metadata_.end() && metadata_it->second.has_end_time) {
+            auto time_remaining = metadata_it->second.event_end_time - std::chrono::system_clock::now();
+            time_to_event_hours = std::chrono::duration<double, std::ratio<3600>>(time_remaining).count();
+        }
         
         // Log the price update
         trading_logger_->logPriceUpdate(
@@ -505,9 +510,37 @@ OrderBook& StrategyEngine::getOrCreateOrderBook(const TokenId& token_id, const s
 void StrategyEngine::registerMarket(const TokenId& token_id, 
                     const std::string& title,
                     const std::string& outcome,
-                    const std::string& market_id = "") {
-    market_metadata_[token_id] = {title, outcome, market_id};
+                    const std::string& market_id) {
+    MarketMetadata metadata;
+    metadata.title = title;
+    metadata.outcome = outcome;
+    metadata.market_id = market_id;
+    metadata.has_end_time = false;
+    market_metadata_[token_id] = metadata;
     LOG_DEBUG("Registered: {} - {}", title, outcome);
+}
+
+void StrategyEngine::setEventEndTime(const std::string& market_id, 
+                                    const std::chrono::system_clock::time_point& end_time) {
+    // Update all tokens associated with this market_id
+    int updated_count = 0;
+    for (auto& [token_id, metadata] : market_metadata_) {
+        if (metadata.market_id == market_id) {
+            metadata.event_end_time = end_time;
+            metadata.has_end_time = true;
+            updated_count++;
+            
+            // Also set it on the market maker for time-aware risk management
+            auto mm_it = market_makers_.find(token_id);
+            if (mm_it != market_makers_.end()) {
+                mm_it->second.setMarketCloseTime(end_time);
+            }
+        }
+    }
+    
+    if (updated_count > 0) {
+        LOG_INFO("Set event end time for market {} ({} tokens)", market_id, updated_count);
+    }
 }
 
 size_t StrategyEngine::getPositionCount() const {

@@ -32,6 +32,9 @@ public:
                     const std::string& title,
                     const std::string& outcome,
                     const std::string& market_id);
+    
+    void setEventEndTime(const std::string& market_id, 
+                        const std::chrono::system_clock::time_point& end_time);
 
     size_t getPositionCount() const;
     size_t getActiveOrderCount() const;

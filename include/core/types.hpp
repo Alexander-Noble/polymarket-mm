@@ -155,6 +155,8 @@ struct MarketMetadata {
     std::string title;        // e.g., "Aston Villa vs Bournemouth"
     std::string outcome;      // e.g., "Villa Win", "Draw", "Bournemouth Win"
     std::string market_id;    // Condition ID
+    std::chrono::system_clock::time_point event_end_time;  // When the event ends
+    bool has_end_time = false;
 };
 
 struct MarketInfo {

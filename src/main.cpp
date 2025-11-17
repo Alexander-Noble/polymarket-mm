@@ -80,9 +80,9 @@ int main() {
 
     std::cout << "\nAvailable events:\n";
     for (size_t i = 0; i < events.size(); i++) {
-        std::cout << "  [" << i << "] " << events[i].title 
-                  << "\n      Volume: $" << static_cast<int>(events[i].volume)
-                  << ", Liquidity: $" << static_cast<int>(events[i].liquidity)
+        std::cout << "  [" << i + 1 << "] " << events[i].title << "\n"
+                  << "      Volume: $" << std::fixed << std::setprecision(0) << events[i].volume
+                  << ", Liquidity: $" << std::fixed << std::setprecision(0) << events[i].liquidity
                   << ", Markets: " << events[i].markets.size() << "\n";
     }
     
@@ -368,6 +368,37 @@ int main() {
     }
 
     LOG_INFO("Total markets registered: {} ({} tokens total)", total_markets, all_tokens.size());
+    
+    // Set event end times for all registered markets
+    for (const auto& [event_idx, market_indices] : selected_markets) {
+        const EventInfo& event = events[event_idx];
+        
+        // Parse end_date string (format: "2025-11-22T20:00:00Z" or similar)
+        if (!event.end_date.empty()) {
+            std::tm tm = {};
+            std::istringstream ss(event.end_date);
+            ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+            
+            if (!ss.fail()) {
+                auto end_time = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+                
+                // Get all unique market_ids for this event
+                std::set<std::string> market_ids;
+                for (size_t market_idx : market_indices) {
+                    market_ids.insert(event.markets[market_idx].market_id);
+                }
+                
+                // Set the end time for each market
+                for (const std::string& market_id : market_ids) {
+                    strategy.setEventEndTime(market_id, end_time);
+                }
+                
+                LOG_DEBUG("Set event end time for '{}': {}", event.title, event.end_date);
+            } else {
+                LOG_WARN("Failed to parse end_date for event: {}", event.title);
+            }
+        }
+    }
     
     strategy.start();
     

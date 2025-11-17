@@ -69,19 +69,37 @@ std::vector<EventInfo> PolymarketHttpClient::parseBatch(const std::string& respo
             event.active = event_json.value("active", false);
             event.closed = event_json.value("closed", false);
 
+            // Parse volume safely
+            event.volume = 0.0;
             if (event_json.contains("volume")) {
                 if (event_json["volume"].is_number()) {
                     event.volume = event_json["volume"].get<double>();
                 } else if (event_json["volume"].is_string()) {
-                    event.volume = std::stod(event_json["volume"].get<std::string>());
+                    try {
+                        std::string vol_str = event_json["volume"].get<std::string>();
+                        if (!vol_str.empty() && vol_str != "null") {
+                            event.volume = std::stod(vol_str);
+                        }
+                    } catch (const std::exception&) {
+                        event.volume = 0.0;
+                    }
                 }
             }
             
+            // Parse liquidity safely
+            event.liquidity = 0.0;
             if (event_json.contains("liquidity")) {
                 if (event_json["liquidity"].is_number()) {
                     event.liquidity = event_json["liquidity"].get<double>();
                 } else if (event_json["liquidity"].is_string()) {
-                    event.liquidity = std::stod(event_json["liquidity"].get<std::string>());
+                    try {
+                        std::string liq_str = event_json["liquidity"].get<std::string>();
+                        if (!liq_str.empty() && liq_str != "null") {
+                            event.liquidity = std::stod(liq_str);
+                        }
+                    } catch (const std::exception&) {
+                        event.liquidity = 0.0;
+                    }
                 }
             }
             
@@ -96,8 +114,30 @@ std::vector<EventInfo> PolymarketHttpClient::parseBatch(const std::string& respo
                     market.description = market_json.value("description", "");
                     market.slug = market_json.value("slug", "");
                     market.active = market_json.value("active", false);
-                    market.volume = std::stod(market_json.value("volume", "0"));
-                    market.liquidity = std::stod(market_json.value("liquidity", "0"));
+                    
+                    // Parse volume safely
+                    try {
+                        std::string vol_str = market_json.value("volume", "0");
+                        if (vol_str.empty() || vol_str == "null") {
+                            market.volume = 0.0;
+                        } else {
+                            market.volume = std::stod(vol_str);
+                        }
+                    } catch (const std::exception&) {
+                        market.volume = 0.0;
+                    }
+                    
+                    // Parse liquidity safely
+                    try {
+                        std::string liq_str = market_json.value("liquidity", "0");
+                        if (liq_str.empty() || liq_str == "null") {
+                            market.liquidity = 0.0;
+                        } else {
+                            market.liquidity = std::stod(liq_str);
+                        }
+                    } catch (const std::exception&) {
+                        market.liquidity = 0.0;
+                    }
                     
                     if (market_json.contains("clobTokenIds")) {
                         auto token_ids = nlohmann::json::parse(market_json["clobTokenIds"].get<std::string>());
@@ -239,7 +279,6 @@ std::vector<EventInfo> PolymarketHttpClient::searchEvents(const std::string& que
     }
     
     LOG_INFO("Found {} matching markets", filtered.size());
-
     std::sort(filtered.begin(), filtered.end(), [](const EventInfo& a, const EventInfo& b) {
         if (a.volume != b.volume) {
             return a.volume > b.volume;
@@ -275,8 +314,30 @@ std::optional<EventInfo> PolymarketHttpClient::getEvent(const std::string& condi
             info.category = event.value("category", "");
             info.active = event.value("active", false);
             info.closed = event.value("closed", false);
-            info.volume = std::stod(event.value("volume", "0"));
-            info.liquidity = std::stod(event.value("liquidity", "0"));
+            
+            // Parse volume safely - handle null/invalid values
+            try {
+                std::string vol_str = event.value("volume", "0");
+                if (vol_str.empty() || vol_str == "null") {
+                    info.volume = 0.0;
+                } else {
+                    info.volume = std::stod(vol_str);
+                }
+            } catch (const std::exception&) {
+                info.volume = 0.0;
+            }
+            
+            // Parse liquidity safely
+            try {
+                std::string liq_str = event.value("liquidity", "0");
+                if (liq_str.empty() || liq_str == "null") {
+                    info.liquidity = 0.0;
+                } else {
+                    info.liquidity = std::stod(liq_str);
+                }
+            } catch (const std::exception&) {
+                info.liquidity = 0.0;
+            }
             
             return info;
         }
