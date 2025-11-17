@@ -146,48 +146,95 @@ int main() {
     // Stage 2: Select markets for each event
     std::cout << "\n=== STAGE 2: SELECT MARKETS ===\n";
     
+    // Ask if user wants to apply same selection to all events
+    bool batch_mode = false;
+    std::string batch_selection;
+    
+    if (selected_event_indices.size() > 1) {
+        std::cout << "Apply same market selection to all " << selected_event_indices.size() << " events?\n";
+        std::cout << "  1. Yes - apply same filter to all (faster)\n";
+        std::cout << "  2. No - select markets per event (more control)\n";
+        std::cout << "Choice [1]: ";
+        
+        std::string choice_str;
+        std::getline(std::cin, choice_str);
+        
+        if (choice_str.empty() || choice_str == "1") {
+            batch_mode = true;
+            
+            std::cout << "\nMarket selection for all events:\n";
+            std::cout << "  all      - Trade all markets\n";
+            std::cout << "  top N    - Top N by volume (e.g., 'top 3')\n";
+            std::cout << "  liquid N - Top N by liquidity (e.g., 'liquid 3')\n";
+            std::cout << "  vol>N    - Markets with volume > $N (e.g., 'vol>50000')\n";
+            std::cout << "Selection [top 2]: ";
+            
+            std::getline(std::cin, batch_selection);
+            
+            if (batch_selection.empty()) {
+                batch_selection = "top 2";
+            }
+            
+            // Trim whitespace
+            batch_selection.erase(0, batch_selection.find_first_not_of(" \t\n\r"));
+            batch_selection.erase(batch_selection.find_last_not_of(" \t\n\r") + 1);
+            
+            std::cout << "\nApplying '" << batch_selection << "' to all events...\n";
+        }
+    }
+    
     // Track which event.market combinations to include
     std::map<size_t, std::set<size_t>> selected_markets;
     
     for (size_t event_idx : selected_event_indices) {
         const EventInfo& event = events[event_idx];
         
-        std::cout << "\n--- " << event.title << " ---\n";
-        std::cout << "Markets (" << event.markets.size() << " total):\n";
-        
-        // Sort markets by volume for display
-        std::vector<std::pair<size_t, const MarketInfo*>> sorted_markets;
-        for (size_t i = 0; i < event.markets.size(); i++) {
-            sorted_markets.push_back({i, &event.markets[i]});
-        }
-        std::sort(sorted_markets.begin(), sorted_markets.end(),
-                 [](const auto& a, const auto& b) { return a.second->volume > b.second->volume; });
-        
-        for (const auto& [idx, market] : sorted_markets) {
-            std::cout << "  [" << idx << "] " << market->question 
-                     << " ($" << static_cast<int>(market->volume/1000) << "K vol, "
-                     << "$" << static_cast<int>(market->liquidity/1000) << "K liq)\n";
-        }
-        
-        std::cout << "\nMarket selection options:\n";
-        std::cout << "  all      - Trade all markets\n";
-        std::cout << "  top N    - Top N by volume (e.g., 'top 3')\n";
-        std::cout << "  liquid N - Top N by liquidity (e.g., 'liquid 3')\n";
-        std::cout << "  vol>N    - Markets with volume > $N (e.g., 'vol>50000')\n";
-        std::cout << "  0,2,5    - Specific market numbers\n";
-        std::cout << "  skip     - Skip this event\n";
-        std::cout << "Selection [all]: ";
-        
         std::string market_selection;
-        std::getline(std::cin, market_selection);
         
-        if (market_selection.empty()) {
-            market_selection = "all";
+        if (batch_mode) {
+            // Use the batch selection
+            market_selection = batch_selection;
+            std::cout << "\n[" << event.title << "]: " << batch_selection << std::flush;
+        } else {
+            // Individual selection per event
+            std::cout << "\n--- " << event.title << " ---\n";
+            std::cout << "Markets (" << event.markets.size() << " total):\n";
         }
         
-        // Trim whitespace
-        market_selection.erase(0, market_selection.find_first_not_of(" \t\n\r"));
-        market_selection.erase(market_selection.find_last_not_of(" \t\n\r") + 1);
+        if (!batch_mode) {
+            // Sort markets by volume for display (only in interactive mode)
+            std::vector<std::pair<size_t, const MarketInfo*>> sorted_markets;
+            for (size_t i = 0; i < event.markets.size(); i++) {
+                sorted_markets.push_back({i, &event.markets[i]});
+            }
+            std::sort(sorted_markets.begin(), sorted_markets.end(),
+                     [](const auto& a, const auto& b) { return a.second->volume > b.second->volume; });
+            
+            for (const auto& [idx, market] : sorted_markets) {
+                std::cout << "  [" << idx << "] " << market->question 
+                         << " ($" << static_cast<int>(market->volume/1000) << "K vol, "
+                         << "$" << static_cast<int>(market->liquidity/1000) << "K liq)\n";
+            }
+            
+            std::cout << "\nMarket selection options:\n";
+            std::cout << "  all      - Trade all markets\n";
+            std::cout << "  top N    - Top N by volume (e.g., 'top 3')\n";
+            std::cout << "  liquid N - Top N by liquidity (e.g., 'liquid 3')\n";
+            std::cout << "  vol>N    - Markets with volume > $N (e.g., 'vol>50000')\n";
+            std::cout << "  0,2,5    - Specific market numbers\n";
+            std::cout << "  skip     - Skip this event\n";
+            std::cout << "Selection [all]: ";
+            
+            std::getline(std::cin, market_selection);
+            
+            if (market_selection.empty()) {
+                market_selection = "all";
+            }
+            
+            // Trim whitespace
+            market_selection.erase(0, market_selection.find_first_not_of(" \t\n\r"));
+            market_selection.erase(market_selection.find_last_not_of(" \t\n\r") + 1);
+        }
         
         if (market_selection == "skip") {
             LOG_INFO("Skipping event: {}", event.title);
@@ -202,7 +249,14 @@ int main() {
                 markets_for_event.insert(i);
             }
         } else if (market_selection.find("top") == 0) {
-            // Top N by volume
+            // Top N by volume - need to sort first
+            std::vector<std::pair<size_t, const MarketInfo*>> sorted_markets;
+            for (size_t i = 0; i < event.markets.size(); i++) {
+                sorted_markets.push_back({i, &event.markets[i]});
+            }
+            std::sort(sorted_markets.begin(), sorted_markets.end(),
+                     [](const auto& a, const auto& b) { return a.second->volume > b.second->volume; });
+            
             std::stringstream ss(market_selection.substr(3));
             int top_n;
             ss >> top_n;
@@ -210,18 +264,29 @@ int main() {
             for (size_t i = 0; i < std::min(static_cast<size_t>(top_n), sorted_markets.size()); i++) {
                 markets_for_event.insert(sorted_markets[i].first);
             }
+            
+            if (batch_mode) {
+                std::cout << " -> selected " << markets_for_event.size() << " markets\n";
+            }
         } else if (market_selection.find("liquid") == 0) {
             // Top N by liquidity
+            std::vector<std::pair<size_t, const MarketInfo*>> liq_sorted;
+            for (size_t i = 0; i < event.markets.size(); i++) {
+                liq_sorted.push_back({i, &event.markets[i]});
+            }
+            std::sort(liq_sorted.begin(), liq_sorted.end(),
+                     [](const auto& a, const auto& b) { return a.second->liquidity > b.second->liquidity; });
+            
             std::stringstream ss(market_selection.substr(6));
             int top_n;
             ss >> top_n;
             
-            auto liq_sorted = sorted_markets;
-            std::sort(liq_sorted.begin(), liq_sorted.end(),
-                     [](const auto& a, const auto& b) { return a.second->liquidity > b.second->liquidity; });
-            
             for (size_t i = 0; i < std::min(static_cast<size_t>(top_n), liq_sorted.size()); i++) {
                 markets_for_event.insert(liq_sorted[i].first);
+            }
+            
+            if (batch_mode) {
+                std::cout << " -> selected " << markets_for_event.size() << " markets\n";
             }
         } else if (market_selection.find("vol>") == 0) {
             // Volume threshold
@@ -231,6 +296,10 @@ int main() {
                 if (event.markets[i].volume >= min_vol) {
                     markets_for_event.insert(i);
                 }
+            }
+            
+            if (batch_mode) {
+                std::cout << " -> selected " << markets_for_event.size() << " markets\n";
             }
         } else {
             // Parse comma-separated numbers
@@ -256,8 +325,14 @@ int main() {
         
         if (!markets_for_event.empty()) {
             selected_markets[event_idx] = markets_for_event;
-            LOG_INFO("Selected {} markets from: {}", markets_for_event.size(), event.title);
+            if (!batch_mode) {
+                LOG_INFO("Selected {} markets from: {}", markets_for_event.size(), event.title);
+            }
         }
+    }
+    
+    if (batch_mode) {
+        std::cout << "\n✓ Batch selection complete\n";
     }
     
     if (selected_markets.empty()) {
@@ -316,6 +391,11 @@ int main() {
 
     bool is_tty = isatty(fileno(stdout));
     
+    // Print initial blank line for dashboard to overwrite
+    if (is_tty) {
+        std::cout << "\n" << std::flush;
+    }
+    
     std::thread status_thread([&, is_tty]() {
         int seconds = 0;
         while (keep_running) {
@@ -368,8 +448,7 @@ int main() {
                 // Build enhanced status line
                 if (is_tty) {
                     // Dashboard mode: overwrite previous line
-                    // Move up 1 line, clear line, then print
-                    std::string status_line = "\033[1A\033[2K\r[STATUS] " + runtime_str + 
+                    std::string status_line = "[STATUS] " + runtime_str + 
                                   " | Mkts:" + std::to_string(active_markets) + "/" + std::to_string(total_markets) +
                                   " | Orders:" + orders_str +
                                   " | Fills:" + std::to_string(fill_count);
@@ -387,9 +466,8 @@ int main() {
                     
                     status_line += " | PnL:" + pnl_str;
                     
-                    // Print to stdout directly (bypassing logger for dashboard)
-                    std::cout << status_line << std::endl;
-                    std::cout.flush();
+                    // Clear line, print status, return carriage (no newline)
+                    std::cout << "\r\033[K" << status_line << std::flush;
                 } else {
                     // Non-TTY mode: use regular logging
                     LOG_INFO("[STATUS] {} | Mkts:{}/{} | Orders:{} | Fills:{} | Pos:{} | Spd:{} | PnL:{}",
@@ -413,6 +491,11 @@ int main() {
     // Wait for status thread to complete and print final newline for dashboard mode
     if (status_thread.joinable()) {
         status_thread.join();
+    }
+    
+    // Print newline after dashboard to move cursor down
+    if (is_tty) {
+        std::cout << "\n" << std::flush;
     }
     
     LOG_INFO("Shutting down...");

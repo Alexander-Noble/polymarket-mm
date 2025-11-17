@@ -357,6 +357,9 @@ void PolymarketWebSocketClient::setReconnectConfig(int max_attempts, std::chrono
 void PolymarketWebSocketClient::handleDisconnection(const std::string& reason) {
     LOG_WARN("WebSocket disconnected: {}", reason);
     
+    // Reset connection state
+    connected_.store(false);
+    
     if (!running_.load()) {
         LOG_INFO("Shutdown requested, not reconnecting");
         return;
@@ -381,12 +384,20 @@ void PolymarketWebSocketClient::attemptReconnect() {
     std::this_thread::sleep_for(delay);
     
     try {
+        running_.store(false);
+        
         connect();
-        reconnect_attempt_ = 0;  // Reset on success
+        reconnect_attempt_ = 0;
+        
         LOG_INFO("Reconnection successful");
+        
+        if (!subscribed_assets_.empty()) {
+            LOG_INFO("Re-subscribing to {} markets after reconnection", subscribed_assets_.size());
+            sendSubscription();
+        }
     } catch (const std::exception& e) {
         LOG_ERROR("Reconnection failed: {}", e.what());
-        attemptReconnect();  // Try again
+        attemptReconnect();
     }
 }
 
