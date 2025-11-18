@@ -24,9 +24,9 @@ public:
     
     OrderId placeOrder(const TokenId& token_id, Side side, Price price, Size size, const std::string& market_id);
 
-    bool cancelOrder(const OrderId& order_id, const std::string& market_id);
-    bool cancelAllOrders(const TokenId& token_id, const std::string& market_id);
-    bool cancelAllOrders();
+    bool cancelOrder(const OrderId& order_id, const std::string& market_id, CancelReason reason = CancelReason::UNKNOWN);
+    bool cancelAllOrders(const TokenId& token_id, const std::string& market_id, CancelReason reason = CancelReason::UNKNOWN);
+    bool cancelAllOrders(CancelReason reason = CancelReason::SHUTDOWN);
 
     void updateOrderBook(const TokenId& token_id, const OrderBook& book);
     

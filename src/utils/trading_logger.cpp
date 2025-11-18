@@ -32,7 +32,7 @@ void TradingLogger::initializeFiles() {
     orders_file_.open(session_dir_ / "orders.csv");
     orders_file_ << "timestamp,market_id,order_id,token_id,side,price,size,status,"
                  << "market_mid_price,our_spread_bps,distance_from_mid_bps,market_spread_bps,"
-                 << "best_bid,best_ask\n";
+                 << "best_bid,best_ask,cancel_reason\n";
     
     fills_file_.open(session_dir_ / "fills.csv");
     fills_file_ << "timestamp,market_id,order_id,token_id,side,fill_price,fill_size,pnl,"
@@ -131,11 +131,23 @@ void TradingLogger::logOrderPlaced(const Order& order, const std::string& market
                  << distance_from_mid_bps << ","
                  << market_spread_bps << ","
                  << best_bid << ","
-                 << best_ask << "\n";
+                 << best_ask << ",\n";
     orders_file_.flush();
 }
 
-void TradingLogger::logOrderCancelled(const OrderId& order_id, const Order& order, const std::string& market_id) {
+static const char* cancelReasonToString(CancelReason reason) {
+    switch (reason) {
+        case CancelReason::QUOTE_UPDATE: return "QUOTE_UPDATE";
+        case CancelReason::TTL_EXPIRED: return "TTL_EXPIRED";
+        case CancelReason::INVENTORY_LIMIT: return "INVENTORY_LIMIT";
+        case CancelReason::SHUTDOWN: return "SHUTDOWN";
+        case CancelReason::MANUAL: return "MANUAL";
+        case CancelReason::UNKNOWN: return "UNKNOWN";
+        default: return "UNKNOWN";
+    }
+}
+
+void TradingLogger::logOrderCancelled(const OrderId& order_id, const Order& order, const std::string& market_id, CancelReason reason) {
     std::lock_guard<std::mutex> lock(mutex_);
     
     if (!orders_file_.is_open()) return;
@@ -147,7 +159,8 @@ void TradingLogger::logOrderCancelled(const OrderId& order_id, const Order& orde
                  << (order.side == Side::BUY ? "BUY" : "SELL") << ","
                  << order.price << ","
                  << order.size << ","
-                 << "CANCELLED\n";
+                 << "CANCELLED,,,,,,,"
+                 << cancelReasonToString(reason) << "\n";
     orders_file_.flush();
 }
 

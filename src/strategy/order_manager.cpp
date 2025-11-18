@@ -88,7 +88,7 @@ OrderId OrderManager::placeOrder(const TokenId& token_id, Side side, Price price
     return order_id;
 }
 
-bool OrderManager::cancelOrder(const OrderId& order_id, const std::string& market_id) {
+bool OrderManager::cancelOrder(const OrderId& order_id, const std::string& market_id, CancelReason reason) {
     auto it = orders_.find(order_id);
     if (it == orders_.end()) {
         LOG_ERROR("Order not found: {}", order_id);
@@ -99,7 +99,7 @@ bool OrderManager::cancelOrder(const OrderId& order_id, const std::string& marke
     order.status = OrderStatus::CANCELLED;
     
     if (trading_logger_) {
-        trading_logger_->logOrderCancelled(order_id, order, market_id);
+        trading_logger_->logOrderCancelled(order_id, order, market_id, reason);
     }
 
     if (trading_mode_ == TradingMode::PAPER) {
@@ -112,7 +112,7 @@ bool OrderManager::cancelOrder(const OrderId& order_id, const std::string& marke
     return true;
 }
 
-bool OrderManager::cancelAllOrders(const TokenId& token_id, const std::string& market_id) {
+bool OrderManager::cancelAllOrders(const TokenId& token_id, const std::string& market_id, CancelReason reason) {
     std::vector<OrderId> to_cancel;
     
     for (const auto& [order_id, order] : orders_) {
@@ -122,7 +122,7 @@ bool OrderManager::cancelAllOrders(const TokenId& token_id, const std::string& m
     }
     
     for (const auto& order_id : to_cancel) {
-        if (!cancelOrder(order_id, market_id)) {
+        if (!cancelOrder(order_id, market_id, reason)) {
             LOG_ERROR("Failed to cancel order: {}", order_id);
             return false;
         }
@@ -130,7 +130,7 @@ bool OrderManager::cancelAllOrders(const TokenId& token_id, const std::string& m
     return true;
 }
 
-bool OrderManager::cancelAllOrders() {
+bool OrderManager::cancelAllOrders(CancelReason reason) {
     std::vector<OrderId> to_cancel;
     
     for (const auto& [order_id, _] : orders_) {
@@ -138,7 +138,7 @@ bool OrderManager::cancelAllOrders() {
     }
     
     for (const auto& order_id : to_cancel) {
-        if (!cancelOrder(order_id, "cancel_all")) {
+        if (!cancelOrder(order_id, "cancel_all", reason)) {
             LOG_ERROR("Failed to cancel order: {}", order_id);
             return false;
         }

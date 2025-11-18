@@ -58,6 +58,7 @@ private:
     
     std::shared_ptr<net::io_context> ioc_;
     std::shared_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws_;
+    std::shared_ptr<beast::flat_buffer> buffer_;
     
     std::vector<std::string> subscribed_assets_;
     std::mutex subscription_mutex_;
@@ -74,7 +75,7 @@ private:
     void parseBookMessage(const nlohmann::json& msg);
     void parsePriceChangeMessage(const nlohmann::json& msg);
 
-    void startAsyncRead(beast::flat_buffer& buffer);
+    void startAsyncRead();
     void startPingTimer();
 
     void attemptReconnect();

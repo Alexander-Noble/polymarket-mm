@@ -131,9 +131,11 @@ void PolymarketWebSocketClient::run() {
             sendSubscription();
         }
 
+        // Create buffer for async reads
+        buffer_ = std::make_shared<beast::flat_buffer>();
+        
         // Start async read
-        beast::flat_buffer buffer;
-        startAsyncRead(buffer);
+        startAsyncRead();
         
         // Start ping timer
         startPingTimer();
@@ -162,11 +164,11 @@ void PolymarketWebSocketClient::run() {
     LOG_INFO("WebSocket thread finished");
 }
 
-void PolymarketWebSocketClient::startAsyncRead(beast::flat_buffer& buffer) {
-    if (!running_.load() || !ws_) return;
+void PolymarketWebSocketClient::startAsyncRead() {
+    if (!running_.load() || !ws_ || !buffer_) return;
     
-    ws_->async_read(buffer,
-        [this, &buffer](beast::error_code ec, std::size_t bytes_transferred) {
+    ws_->async_read(*buffer_,
+        [this](beast::error_code ec, std::size_t bytes_transferred) {
             if (ec) {
                 if (ec == websocket::error::closed) {
                     handleDisconnection("Connection closed by remote");
@@ -178,12 +180,12 @@ void PolymarketWebSocketClient::startAsyncRead(beast::flat_buffer& buffer) {
                 return;
             }
             
-            std::string message = beast::buffers_to_string(buffer.data());
+            std::string message = beast::buffers_to_string(buffer_->data());
             handleMessage(message);
-            buffer.consume(buffer.size());
+            buffer_->consume(buffer_->size());
             
             // Continue reading
-            startAsyncRead(buffer);
+            startAsyncRead();
         });
 }
 
@@ -415,8 +417,26 @@ void PolymarketWebSocketClient::attemptReconnect() {
     std::this_thread::sleep_for(delay);
     
     try {
+        // Properly clean up the old connection first
         running_.store(false);
+        connected_.store(false);
         
+        // Stop the io_context to exit the run loop
+        if (ioc_) {
+            ioc_->stop();
+        }
+        
+        // Wait for the thread to finish
+        if (ws_thread_.joinable()) {
+            ws_thread_.join();
+        }
+        
+        // Clean up old resources
+        buffer_.reset();
+        ws_.reset();
+        ioc_.reset();
+        
+        // Now attempt to reconnect
         connect();
         reconnect_attempt_ = 0;
         

@@ -22,7 +22,7 @@ public:
                        Price market_mid = 0.0, Price market_spread = 0.0, 
                        Price best_bid = 0.0, Price best_ask = 0.0,
                        Price our_bid = 0.0, Price our_ask = 0.0);
-    void logOrderCancelled(const OrderId& order_id, const Order& order, const std::string& market_id);
+    void logOrderCancelled(const OrderId& order_id, const Order& order, const std::string& market_id, CancelReason reason = CancelReason::UNKNOWN);
     void logOrderFilled(const std::string& market_id, const OrderId& order_id, const TokenId& token_id, 
                        Price fill_price, Size fill_size, Side side, double pnl = 0.0,
                        Price quoted_price = 0.0, Price mid_at_fill = 0.0, 

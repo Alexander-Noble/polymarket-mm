@@ -158,7 +158,8 @@ private:
     void handleOrderRejected(const Event& event);
     
     void calculateQuotes(const TokenId& token_id, 
-                         const std::string& market_name);
+                         const std::string& market_name,
+                         CancelReason cancel_reason = CancelReason::QUOTE_UPDATE);
     
     OrderBook& getOrCreateOrderBook(const TokenId& token_id, 
                                    const std::string& market_name);

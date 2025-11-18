@@ -146,6 +146,15 @@ enum class OrderStatus {
     CANCELLED
 };
 
+enum class CancelReason {
+    QUOTE_UPDATE,       // Requoting due to market conditions change
+    TTL_EXPIRED,        // Quote TTL expired
+    INVENTORY_LIMIT,    // Position size exceeded limits
+    SHUTDOWN,           // System shutdown
+    MANUAL,             // Manual cancellation
+    UNKNOWN             // Unknown/unspecified reason
+};
+
 
 struct Order {
     OrderId order_id;

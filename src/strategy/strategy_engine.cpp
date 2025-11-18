@@ -518,7 +518,8 @@ void StrategyEngine::handleOrderRejected(const Event& event) {
 }
 
 void StrategyEngine::calculateQuotes(const TokenId& token_id, 
-                                   const std::string& market_name) {
+                                   const std::string& market_name,
+                                   CancelReason cancel_reason) {
     auto it = order_books_.find(token_id);
     if (it == order_books_.end()) {
         LOG_ERROR("No order book found for token: {} , market: {}", token_id, market_name);
@@ -616,7 +617,7 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
         }
         LOG_DEBUG("[{}] Bid {} x {} / Ask {} x {}", market_name, quote.bid_price, quote.bid_size, quote.ask_price, quote.ask_size);
         
-        order_manager_.cancelAllOrders(token_id, market_name);
+        order_manager_.cancelAllOrders(token_id, market_name, cancel_reason);
         
         order_manager_.placeOrder(token_id, Side::BUY, quote.bid_price, quote.bid_size, market_name);
         order_manager_.placeOrder(token_id, Side::SELL, quote.ask_price, quote.ask_size, market_name);
@@ -646,7 +647,7 @@ void StrategyEngine::checkExpiredQuotes() {
             }
             
             LOG_DEBUG("Quote expired for {}, requoting...", market_name);
-            calculateQuotes(token_id, market_name);
+            calculateQuotes(token_id, market_name, CancelReason::TTL_EXPIRED);
         }
     }
 }
