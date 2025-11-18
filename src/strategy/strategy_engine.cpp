@@ -10,6 +10,7 @@ StrategyEngine::StrategyEngine(EventQueue& queue, TradingMode mode)
     : event_queue_(queue),
     state_persistence_(std::make_unique<StatePersistence>("./state.json")),
     trading_logger_(std::make_unique<TradingLogger>("./logs")),
+    market_summary_logger_(nullptr),  // Initialized in startLogging
     as_manager_(std::make_unique<AdverseSelectionManager>(0.02)),
     order_manager_(queue, mode, trading_logger_.get()),
     running_(false) {
@@ -83,6 +84,8 @@ void StrategyEngine::run() {
     LOG_DEBUG("StrategyEngine event loop started");
     
     auto last_snapshot = std::chrono::steady_clock::now();
+    auto last_quote_check = std::chrono::steady_clock::now();
+    auto last_summary_check = std::chrono::steady_clock::now();
 
     while (running_.load()) {
         Event event = event_queue_.pop();
@@ -104,6 +107,11 @@ void StrategyEngine::run() {
                 handleOrderRejected(event);
                 break;
                 
+            case EventType::TIMER_TICK:
+                // Check for expired quotes on timer tick
+                checkExpiredQuotes();
+                break;
+                
             case EventType::SHUTDOWN:
                 LOG_DEBUG("Received shutdown event");
                 running_.store(false);
@@ -115,6 +123,21 @@ void StrategyEngine::run() {
         }
 
         auto now = std::chrono::steady_clock::now();
+        
+        // Check expired quotes every second
+        if (now - last_quote_check > std::chrono::seconds(1)) {
+            checkExpiredQuotes();
+            last_quote_check = now;
+        }
+        
+        // Check if we should log market summaries (adaptive interval)
+        if (market_summary_logger_ && (now - last_summary_check > std::chrono::seconds(5))) {
+            if (market_summary_logger_->shouldLogSummary()) {
+                market_summary_logger_->logSummaries();
+            }
+            last_summary_check = now;
+        }
+        
         if (now - last_snapshot > std::chrono::seconds(60)) {
             snapshotPositions();
             checkPendingFillMetrics();
@@ -130,10 +153,16 @@ void StrategyEngine::run() {
 void StrategyEngine::handleBookSnapshot(const Event& event) {
     auto& payload = std::get<BookSnapshotPayload>(event.payload);
 
-    std::string market_name = payload.token_id;
+    // Check if this is a token we registered
     auto it = market_metadata_.find(payload.token_id);
-    if (it != market_metadata_.end()) {
+    bool is_registered = (it != market_metadata_.end());
+    
+    std::string market_name = payload.token_id;
+    if (is_registered) {
         market_name = it->second.title + " - " + it->second.outcome;
+        LOG_DEBUG("[REGISTERED] Book snapshot for {}: {} bids, {} asks", market_name, payload.bids.size(), payload.asks.size());
+    } else {
+        LOG_DEBUG("[UNREGISTERED] Book snapshot for token {}: {} bids, {} asks", payload.token_id.substr(0, 16), payload.bids.size(), payload.asks.size());
     }
     LOG_DEBUG("Book snapshot for {}: {} bids, {} asks", market_name, payload.bids.size(), payload.asks.size());
         
@@ -173,15 +202,30 @@ void StrategyEngine::handleBookSnapshot(const Event& event) {
     }
     
     order_manager_.updateOrderBook(payload.token_id, book);
-    calculateQuotes(payload.token_id, market_name);
+    
+    // Only calculate quotes for registered (tradable) tokens
+    if (it != market_metadata_.end()) {
+        calculateQuotes(payload.token_id, market_name);
+    } else {
+        LOG_DEBUG("Skipping quote calculation for unregistered token");
+    }
 }
 
 void StrategyEngine::handlePriceUpdate(const Event& event) {
     auto& payload = std::get<PriceLevelUpdatePayload>(event.payload);
     auto token_id = payload.token_id;
-    auto market_name = market_metadata_.find(token_id) != market_metadata_.end() ?
-                       market_metadata_[token_id].title + " - " + market_metadata_[token_id].outcome :
-                       token_id;
+    
+    // Check if this is a token we registered
+    auto metadata_it = market_metadata_.find(token_id);
+    bool is_registered = (metadata_it != market_metadata_.end());
+    
+    std::string market_name = token_id;
+    if (is_registered) {
+        market_name = metadata_it->second.title + " - " + metadata_it->second.outcome;
+        LOG_DEBUG("[REGISTERED] Price update for {}: {} bids, {} asks", market_name, payload.bids.size(), payload.asks.size());
+    } else {
+        LOG_DEBUG("[UNREGISTERED] Price update for token {}: {} bids, {} asks", token_id.substr(0, 16), payload.bids.size(), payload.asks.size());
+    }
     LOG_DEBUG("Price update for {}: {} bids, {} asks", market_name, payload.bids.size(), payload.asks.size());
 
     OrderBook& book = getOrCreateOrderBook(token_id, market_name);
@@ -254,9 +298,19 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
             time_to_event_hours = std::chrono::duration<double, std::ratio<3600>>(time_remaining).count();
         }
         
+        // Get market_id and condition_id from metadata, or "UNKNOWN" for unregistered tokens
+        std::string market_id = "UNKNOWN";
+        std::string condition_id = "UNKNOWN";
+        if (metadata_it != market_metadata_.end()) {
+            market_id = metadata_it->second.market_id;
+            condition_id = metadata_it->second.condition_id;
+        }
+        
         // Log the price update
         trading_logger_->logPriceUpdate(
             market_name,
+            market_id,
+            condition_id,
             token_id,
             current_mid,
             price_change_pct,
@@ -276,6 +330,24 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
             seconds_since_last
         );
         
+        // Update market summary logger if available
+        if (market_summary_logger_ && metadata_it != market_metadata_.end()) {
+            market_summary_logger_->updateMarket(
+                market_name,
+                market_id,
+                condition_id,
+                token_id,
+                current_mid,
+                spread_bps,
+                book.getBestBid(),
+                book.getBestAsk(),
+                bid_volume,
+                ask_volume,
+                bid_levels,
+                ask_levels
+            );
+        }
+        
         // Update price history for next comparison
         {
             std::lock_guard<std::mutex> lock(price_history_mutex_);
@@ -287,7 +359,12 @@ void StrategyEngine::handlePriceUpdate(const Event& event) {
         }
     }
 
-    calculateQuotes(token_id, market_name);
+    // Only calculate quotes for registered (tradable) tokens
+    if (is_registered) {
+        calculateQuotes(token_id, market_name);
+    } else {
+        LOG_DEBUG("Skipping quote calculation for unregistered token");
+    }
 }
 
 void StrategyEngine::handleOrderFill(const Event& event) {
@@ -380,6 +457,33 @@ void StrategyEngine::handleOrderFill(const Event& event) {
     }
     
     if (trading_logger_) {
+        // Get quoted price from active_quotes if available
+        Price quoted_price = payload.fill_price;  // Default to fill price
+        double seconds_to_fill = 0.0;
+        
+        {
+            std::lock_guard<std::mutex> lock(quotes_mutex_);
+            auto quote_it = active_quotes_.find(payload.token_id);
+            if (quote_it != active_quotes_.end()) {
+                // Determine quoted price based on side
+                quoted_price = (payload.side == Side::BUY) ? 
+                              quote_it->second.bid_price : quote_it->second.ask_price;
+                
+                // Calculate time to fill
+                auto now = std::chrono::steady_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::duration<double>>(
+                    now - quote_it->second.quote_created_at);
+                seconds_to_fill = duration.count();
+            }
+        }
+        
+        // Get mid price at fill from order book
+        Price mid_at_fill = 0.0;
+        auto book_it = order_books_.find(payload.token_id);
+        if (book_it != order_books_.end()) {
+            mid_at_fill = book_it->second.getMid();
+        }
+        
         trading_logger_->logOrderFilled(
             market_name,
             payload.order_id,
@@ -387,7 +491,10 @@ void StrategyEngine::handleOrderFill(const Event& event) {
             payload.fill_price,
             payload.filled_size,
             payload.side,
-            mm_it->second.getRealizedPnL()
+            mm_it->second.getRealizedPnL(),
+            quoted_price,
+            mid_at_fill,
+            seconds_to_fill
         );
         
         // Log position change after fill
@@ -420,16 +527,26 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
     
     const OrderBook& book = it->second;
     
+    // Check if this token has a market maker (i.e., it's tradable)
+    // Don't auto-create market makers - only trade explicitly registered markets
+    auto mm_it = market_makers_.find(token_id);
+    bool is_tradable = (mm_it != market_makers_.end());
+    
     if (!book.hasValidBBO()) {
-        LOG_WARN("No valid BBO for {}, skipping quote calculation", token_id);
+        // Only warn for tradable tokens - observation-only tokens (No side) may have incomplete books
+        if (is_tradable) {
+            LOG_WARN("No valid BBO for {}, skipping quote calculation", token_id);
+        } else {
+            LOG_DEBUG("Incomplete BBO for observation-only token {} ({})", market_name, token_id);
+        }
         return;
     }
     
-    auto mm_it = market_makers_.try_emplace(
-        token_id, 
-        0.02,      // spread
-        1000.0     // risk_aversion
-    ).first;
+    // Skip quoting if this is an observation-only token (no market maker registered)
+    if (!is_tradable) {
+        LOG_DEBUG("Skipping quotes for observation-only token {} ({})", market_name, token_id);
+        return;
+    }
 
     // Restore inventory from persisted state if available (only on first quote)
     static std::unordered_set<TokenId> restored_markets;
@@ -453,7 +570,14 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
     double ask_multiplier = as_manager_->getSpreadMultiplier(token_id, Side::SELL, inventory);
     double spread_multiplier = std::max(bid_multiplier, ask_multiplier);  // Use worst case
     
-    auto quote_opt = mm_it->second.generateQuote(book, spread_multiplier);
+    // Get market metadata for TTL calculation
+    const MarketMetadata* metadata = nullptr;
+    auto metadata_it = market_metadata_.find(token_id);
+    if (metadata_it != market_metadata_.end()) {
+        metadata = &metadata_it->second;
+    }
+    
+    auto quote_opt = mm_it->second.generateQuote(book, metadata, spread_multiplier);
     
     if (quote_opt.has_value()) {
         const Quote& quote = quote_opt.value();
@@ -471,7 +595,7 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
             }
         }
         
-        // Always update active_quotes_ with current state (prices and inventory)
+        // Always update active_quotes_ with current state (prices, inventory, and TTL)
         {
             std::lock_guard<std::mutex> lock(quotes_mutex_);
             QuoteSummary summary;
@@ -482,6 +606,8 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
             summary.spread_bps = (quote.ask_price - quote.bid_price) / book.getMid() * 10000;
             summary.inventory = mm_it->second.getInventory();
             summary.last_update = std::chrono::steady_clock::now();
+            summary.quote_created_at = quote.created_at;
+            summary.ttl_seconds = quote.ttl_seconds;
             active_quotes_[token_id] = summary;
         }
         
@@ -497,6 +623,34 @@ void StrategyEngine::calculateQuotes(const TokenId& token_id,
     }
 }
 
+void StrategyEngine::checkExpiredQuotes() {
+    std::vector<TokenId> expired_tokens;
+    
+    {
+        std::lock_guard<std::mutex> lock(quotes_mutex_);
+        for (const auto& [token_id, quote_summary] : active_quotes_) {
+            if (quote_summary.isExpired()) {
+                expired_tokens.push_back(token_id);
+            }
+        }
+    }
+    
+    // Requote expired markets
+    for (const auto& token_id : expired_tokens) {
+        auto it = order_books_.find(token_id);
+        if (it != order_books_.end() && it->second.hasValidBBO()) {
+            std::string market_name = token_id;
+            auto metadata_it = market_metadata_.find(token_id);
+            if (metadata_it != market_metadata_.end()) {
+                market_name = metadata_it->second.title + " - " + metadata_it->second.outcome;
+            }
+            
+            LOG_DEBUG("Quote expired for {}, requoting...", market_name);
+            calculateQuotes(token_id, market_name);
+        }
+    }
+}
+
 OrderBook& StrategyEngine::getOrCreateOrderBook(const TokenId& token_id, const std::string& market_name) {
     auto it = order_books_.find(token_id);
     if (it == order_books_.end()) {
@@ -508,24 +662,40 @@ OrderBook& StrategyEngine::getOrCreateOrderBook(const TokenId& token_id, const s
 }
 
 void StrategyEngine::registerMarket(const TokenId& token_id, 
-                    const std::string& title,
-                    const std::string& outcome,
-                    const std::string& market_id) {
+                                    const std::string& title,
+                                    const std::string& outcome,
+                                    const std::string& market_id,
+                                    const std::string& condition_id) {
+    // Store metadata
+    registerMarketMetadata(token_id, title, outcome, market_id, condition_id);
+    
+    // Create market maker for this token (makes it tradable)
+    auto it = market_makers_.find(token_id);
+    if (it == market_makers_.end()) {
+        market_makers_.emplace(token_id, MarketMaker());
+        LOG_DEBUG("Created market maker for: {} - {}", title, outcome);
+    }
+}
+
+void StrategyEngine::registerMarketMetadata(const TokenId& token_id,
+                                           const std::string& title,
+                                           const std::string& outcome,
+                                           const std::string& market_id,
+                                           const std::string& condition_id) {
     MarketMetadata metadata;
     metadata.title = title;
     metadata.outcome = outcome;
     metadata.market_id = market_id;
+    metadata.condition_id = condition_id;
     metadata.has_end_time = false;
     market_metadata_[token_id] = metadata;
-    LOG_DEBUG("Registered: {} - {}", title, outcome);
-}
-
-void StrategyEngine::setEventEndTime(const std::string& market_id, 
+    LOG_DEBUG("Registered metadata: {} - {}", title, outcome);
+}void StrategyEngine::setEventEndTime(const std::string& condition_id, 
                                     const std::chrono::system_clock::time_point& end_time) {
-    // Update all tokens associated with this market_id
+    // Update all tokens associated with this condition_id
     int updated_count = 0;
     for (auto& [token_id, metadata] : market_metadata_) {
-        if (metadata.market_id == market_id) {
+        if (metadata.condition_id == condition_id) {
             metadata.event_end_time = end_time;
             metadata.has_end_time = true;
             updated_count++;
@@ -538,8 +708,13 @@ void StrategyEngine::setEventEndTime(const std::string& market_id,
         }
     }
     
+    // Update market summary logger
+    if (market_summary_logger_) {
+        market_summary_logger_->setEventEndTime(condition_id, end_time);
+    }
+    
     if (updated_count > 0) {
-        LOG_INFO("Set event end time for market {} ({} tokens)", market_id, updated_count);
+        LOG_DEBUG("Set event end time for condition {} ({} tokens)", condition_id, updated_count);
     }
 }
 
@@ -590,17 +765,21 @@ double StrategyEngine::getTotalInventory() const {
 }
 
 double StrategyEngine::getAverageSpread() const {
-    double total_spread = 0.0;
+    double total_spread_pct = 0.0;
     int count = 0;
     
     for (const auto& [token_id, book] : order_books_) {
         if (book.hasValidBBO()) {
-            total_spread += book.getSpread();
-            count++;
+            double spread = book.getSpread();
+            double mid = book.getMid();
+            if (mid > 0) {
+                total_spread_pct += (spread / mid);
+                count++;
+            }
         }
     }
     
-    return (count > 0) ? (total_spread / count) : 0.0;
+    return (count > 0) ? (total_spread_pct / count) : 0.0;
 }
 
 size_t StrategyEngine::getFillCount() const {
@@ -682,6 +861,14 @@ void StrategyEngine::updatePosition(const TokenId& token_id, double qty, double 
 void StrategyEngine::startLogging(const std::string& event_name) {
     if (trading_logger_) {
         trading_logger_->startSession(event_name);
+        
+        // Initialize market summary logger with the session directory
+        std::string session_id = trading_logger_->getSessionId();
+        std::filesystem::path session_dir = std::filesystem::path("./logs") / session_id;
+        market_summary_logger_ = std::make_unique<MarketSummaryLogger>(session_dir);
+        
+        LOG_INFO("Market summary logger initialized");
+        
         // Don't log initial positions yet - wait until we have market data
     }
 }
@@ -867,14 +1054,15 @@ void StrategyEngine::logQuoteSummary() {
               });
     
     // Show top 5 by inventory risk
-    LOG_INFO("Top markets by inventory:");
+    LOG_INFO("\nTop markets by inventory:");
     size_t count = 0;
     for (const auto& [token_id, summary] : sorted_quotes) {
         if (count++ >= 5) break;
         if (summary.bid_price > 0 && summary.ask_price > 0) {
-            LOG_INFO("  {} | Mid: {:.3f} | Bid: {:.3f} / Ask: {:.3f} | Spread: {:.1f}bps | Inv: {:.1f}",
+            int seconds_left = summary.getSecondsUntilExpiry();
+            LOG_INFO("  {} | Mid: {:.3f} | Bid: {:.3f} / Ask: {:.3f} | Spread: {:.1f}bps | Inv: {:.1f} | TTL: {}s",
                      summary.market_name, summary.mid, summary.bid_price, summary.ask_price,
-                     summary.spread_bps, summary.inventory);
+                     summary.spread_bps, summary.inventory, seconds_left);
         } else {
             LOG_INFO("  {} | Mid: {:.3f} | NOT QUOTING | Inv: {:.1f}",
                      summary.market_name, summary.mid, summary.inventory);

@@ -19,7 +19,9 @@ MarketMaker::MarketMaker(double spread_pct, double max_position)
     LOG_DEBUG("MarketMaker initialized: spread={}, max_pos={}, gamma={}, sigma={}", spread_pct, max_position, risk_aversion_, volatility_);
 }
 
-std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book, double spread_multiplier) {
+std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book, 
+                                               const MarketMetadata* metadata,
+                                               double spread_multiplier) {
     Price mid = book.getMid();
     Price market_spread = book.getSpread();
     
@@ -125,9 +127,34 @@ std::optional<Quote> MarketMaker::generateQuote(const OrderBook& book, double sp
         return std::nullopt;
     }
 
-    Quote quote{our_bid, quote_size, our_ask, quote_size};
+    // Calculate TTL based on market phase
+    int ttl_seconds = 90;  // Default: 90 seconds
+    if (metadata != nullptr) {
+        ttl_seconds = metadata->getRecommendedTTL();
+        MarketPhase phase = metadata->getMarketPhase();
+        
+        static MarketPhase last_logged_phase = MarketPhase::PRE_MATCH_EARLY;
+        if (phase != last_logged_phase) {
+            const char* phase_name[] = {"PRE_MATCH_EARLY", "PRE_MATCH_LATE", "PRE_MATCH_CRITICAL", "IN_PLAY"};
+            LOG_INFO("Market phase changed to {}, TTL: {}s, Requote interval: {}s", 
+                    phase_name[static_cast<int>(phase)], 
+                    metadata->getRecommendedTTL(),
+                    metadata->getRequoteInterval());
+            last_logged_phase = phase;
+        }
+    }
+
+    Quote quote{
+        our_bid, 
+        quote_size, 
+        our_ask, 
+        quote_size,
+        ttl_seconds,
+        std::chrono::steady_clock::now()
+    };
     
-    LOG_DEBUG("Generated quote: Bid {} x {} / Ask {} x {} (inventory: {})", our_bid, quote_size, our_ask, quote_size, inventory_);
+    LOG_DEBUG("Generated quote: Bid {} x {} / Ask {} x {} (inventory: {}, TTL: {}s)", 
+             our_bid, quote_size, our_ask, quote_size, inventory_, ttl_seconds);
     
     return quote;
 }

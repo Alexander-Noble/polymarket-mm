@@ -19,6 +19,13 @@ enum class Side {
     SELL
 };
 
+enum class MarketPhase {
+    PRE_MATCH_EARLY,    // 2+ hours before
+    PRE_MATCH_LATE,     // Last hour
+    PRE_MATCH_CRITICAL, // Last 10 minutes
+    IN_PLAY             // Event started
+};
+
 enum class EventType {
     BOOK_SNAPSHOT,
     PRICE_LEVEL_UPDATE,
@@ -154,15 +161,71 @@ struct Order {
 struct MarketMetadata {
     std::string title;        // e.g., "Aston Villa vs Bournemouth"
     std::string outcome;      // e.g., "Villa Win", "Draw", "Bournemouth Win"
-    std::string market_id;    // Condition ID
+    std::string market_id;    // Polymarket's market ID for this specific market
+    std::string condition_id; // Polymarket condition ID (groups related outcome markets)
     std::chrono::system_clock::time_point event_end_time;  // When the event ends
     bool has_end_time = false;
+    
+    // Get market phase based on time to event
+    MarketPhase getMarketPhase() const {
+        if (!has_end_time) {
+            return MarketPhase::PRE_MATCH_EARLY;  // Default to conservative
+        }
+        
+        auto now = std::chrono::system_clock::now();
+        auto time_to_match = std::chrono::duration_cast<std::chrono::minutes>(event_end_time - now);
+        
+        if (time_to_match.count() < 0) {
+            return MarketPhase::IN_PLAY;  // Event started
+        } else if (time_to_match.count() < 10) {
+            return MarketPhase::PRE_MATCH_CRITICAL;
+        } else if (time_to_match.count() < 60) {
+            return MarketPhase::PRE_MATCH_LATE;
+        } else {
+            return MarketPhase::PRE_MATCH_EARLY;
+        }
+    }
+    
+    // Get recommended TTL in seconds based on market phase
+    int getRecommendedTTL() const {
+        switch (getMarketPhase()) {
+            case MarketPhase::PRE_MATCH_EARLY:
+                return 90;  // 60-120 seconds
+            case MarketPhase::PRE_MATCH_LATE:
+                return 45;  // 30-60 seconds
+            case MarketPhase::PRE_MATCH_CRITICAL:
+                return 20;  // 10-30 seconds
+            case MarketPhase::IN_PLAY:
+                return 3;   // 1-5 seconds
+        }
+        return 90;  // Default
+    }
+    
+    // Get recommended requote interval in seconds
+    int getRequoteInterval() const {
+        switch (getMarketPhase()) {
+            case MarketPhase::PRE_MATCH_EARLY:
+                return 45;  // Every 30-60 seconds
+            case MarketPhase::PRE_MATCH_LATE:
+                return 22;  // Every 15-30 seconds
+            case MarketPhase::PRE_MATCH_CRITICAL:
+                return 7;   // Every 5-10 seconds
+            case MarketPhase::IN_PLAY:
+                return 1;   // Constantly
+        }
+        return 45;  // Default
+    }
 };
 
+// Polymarket market info from API
+// NOTE: Polymarket's naming is confusing:
+//   - market_id: Unique ID for this specific market (e.g., "Will X win?")
+//   - condition_id: Groups related markets together (e.g., all outcomes for an event)
+//   - token_id: ERC-1155 token ID for a specific outcome (Yes/No)
 struct MarketInfo {
     std::string event_title;
-    std::string market_id;
-    std::string condition_id;
+    std::string market_id;      // Polymarket's market ID for this specific market
+    std::string condition_id;   // Groups related outcome markets (use this for event tracking)
     std::string question;
     std::string description; 
     std::vector<TokenId> tokens;

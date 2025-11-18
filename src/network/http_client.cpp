@@ -69,37 +69,19 @@ std::vector<EventInfo> PolymarketHttpClient::parseBatch(const std::string& respo
             event.active = event_json.value("active", false);
             event.closed = event_json.value("closed", false);
 
-            // Parse volume safely
-            event.volume = 0.0;
             if (event_json.contains("volume")) {
                 if (event_json["volume"].is_number()) {
                     event.volume = event_json["volume"].get<double>();
                 } else if (event_json["volume"].is_string()) {
-                    try {
-                        std::string vol_str = event_json["volume"].get<std::string>();
-                        if (!vol_str.empty() && vol_str != "null") {
-                            event.volume = std::stod(vol_str);
-                        }
-                    } catch (const std::exception&) {
-                        event.volume = 0.0;
-                    }
+                    event.volume = std::stod(event_json["volume"].get<std::string>());
                 }
             }
             
-            // Parse liquidity safely
-            event.liquidity = 0.0;
             if (event_json.contains("liquidity")) {
                 if (event_json["liquidity"].is_number()) {
                     event.liquidity = event_json["liquidity"].get<double>();
                 } else if (event_json["liquidity"].is_string()) {
-                    try {
-                        std::string liq_str = event_json["liquidity"].get<std::string>();
-                        if (!liq_str.empty() && liq_str != "null") {
-                            event.liquidity = std::stod(liq_str);
-                        }
-                    } catch (const std::exception&) {
-                        event.liquidity = 0.0;
-                    }
+                    event.liquidity = std::stod(event_json["liquidity"].get<std::string>());
                 }
             }
             
@@ -264,7 +246,8 @@ std::vector<EventInfo> PolymarketHttpClient::searchEvents(const std::string& que
                 lower_title.find("last place") != std::string::npos ||
                 lower_title.find("2nd place") != std::string::npos ||
                 lower_title.find("3rd place") != std::string::npos ||
-                lower_title.find("be promoted") != std::string::npos) {
+                lower_title.find("be promoted") != std::string::npos ||
+                lower_title.find("more markets") != std::string::npos) {
                 continue;
             }
             

@@ -215,7 +215,13 @@ void PolymarketWebSocketClient::subscribe(const std::vector<std::string>& asset_
     
     subscribed_assets_ = asset_ids;
     
-    LOG_DEBUG("Queued subscription for {} assets", asset_ids.size());
+    LOG_INFO("Subscribing to {} tokens", asset_ids.size());
+    LOG_DEBUG("=== SUBSCRIPTION REQUEST ===");
+    for (size_t i = 0; i < asset_ids.size(); i++) {
+        LOG_DEBUG("  [{}] Token: {}", i, asset_ids[i]);
+    }
+    LOG_DEBUG("===========================");
+    
     LOG_DEBUG("Connected: {}", connected_.load());
     LOG_DEBUG("WebSocket is {}", ws_->is_open() ? "open" : "closed");
     LOG_DEBUG("IO context is {}", ioc_ ? "valid" : "null");
@@ -299,6 +305,19 @@ void PolymarketWebSocketClient::parseMessage(const nlohmann::json& json_msg) {
 void PolymarketWebSocketClient::parseBookMessage(const nlohmann::json& msg) {
     std::string asset_id = msg["asset_id"];
     
+    // Check if this token was in our subscription
+    bool is_subscribed = false;
+    {
+        std::lock_guard<std::mutex> lock(subscription_mutex_);
+        is_subscribed = std::find(subscribed_assets_.begin(), subscribed_assets_.end(), asset_id) != subscribed_assets_.end();
+    }
+    
+    if (!is_subscribed) {
+        LOG_DEBUG("[WS RECV] Book message for unsubscribed token: {}... (Polymarket sends both sides)", asset_id.substr(0, 16));
+    } else {
+        LOG_DEBUG("[WS RECV] Book message for subscribed token: {}...{}", asset_id.substr(0, 8), asset_id.substr(asset_id.length()-8));
+    }
+    
     std::vector<std::pair<Price, Size>> bids;
     std::vector<std::pair<Price, Size>> asks;
     
@@ -315,6 +334,7 @@ void PolymarketWebSocketClient::parseBookMessage(const nlohmann::json& msg) {
     }
 
     LOG_DEBUG("Pushed book event for {} (bids: {}, asks: {})", asset_id.substr(0, 8), bids.size(), asks.size());
+    LOG_DEBUG("[WS RECV] Book snapshot for token: {}", asset_id);
 
     auto event = Event::bookSnapshot(asset_id, std::move(bids), std::move(asks));
     event_queue_.push(std::move(event));
@@ -322,10 +342,21 @@ void PolymarketWebSocketClient::parseBookMessage(const nlohmann::json& msg) {
 
 void PolymarketWebSocketClient::parsePriceChangeMessage(const nlohmann::json& msg) {
     auto price_changes = msg["price_changes"]; 
-    LOG_DEBUG("Received price change message with {} changes.", price_changes.size());
+    LOG_DEBUG("[WS RECV] Price change message with {} changes.", price_changes.size());
     
     for (const auto& change : price_changes) {
         std::string asset_id = change["asset_id"];
+        
+        // Check if this token was in our subscription (Polymarket sends both Yes/No even if we only subscribed to one)
+        bool is_subscribed = false;
+        {
+            std::lock_guard<std::mutex> lock(subscription_mutex_);
+            is_subscribed = std::find(subscribed_assets_.begin(), subscribed_assets_.end(), asset_id) != subscribed_assets_.end();
+        }
+        
+        if (!is_subscribed) {
+            LOG_DEBUG("[WS RECV] Price change for unsubscribed token (other side): {}...", asset_id.substr(0, 16));
+        }
 
         Price price = std::stod(change["price"].get<std::string>());
         Size size = std::stod(change["size"].get<std::string>());
@@ -333,7 +364,7 @@ void PolymarketWebSocketClient::parsePriceChangeMessage(const nlohmann::json& ms
         std::string side_str = change["side"];
         Side side = (side_str == "BUY") ? Side::BUY : Side::SELL;
 
-        LOG_DEBUG("Price change for asset {}: {} x {} ({})", asset_id, price, size, side_str);
+        LOG_DEBUG("  -> {} x {} ({})", price, size, side_str);
 
         std::vector<std::pair<Price, Size>> bids;
         std::vector<std::pair<Price, Size>> asks;

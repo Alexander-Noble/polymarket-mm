@@ -84,7 +84,7 @@ TEST_F(TradingLoggerTest, LogOrderPlaced) {
     order.price = 0.55;
     order.size = 100.0;
     
-    logger->logOrderPlaced(order, "MARKET_001");
+    logger->logOrderPlaced(order, "MARKET_001", 0.50, 0.04, 0.48, 0.52, 0.48, 0.52);
     
     std::string session_id = logger->getSessionId();
     std::filesystem::path orders_file = std::filesystem::path(test_dir) / session_id / "orders.csv";
@@ -119,7 +119,7 @@ TEST_F(TradingLoggerTest, LogOrderCancelled) {
 TEST_F(TradingLoggerTest, LogOrderFilled) {
     logger->startSession("Test Event");
     
-    logger->logOrderFilled("MARKET_003", "ORDER_789", "TOKEN_DEF", 0.60, 150.0, Side::BUY, 25.50);
+    logger->logOrderFilled("MARKET_003", "ORDER_789", "TOKEN_DEF", 0.60, 150.0, Side::BUY, 25.50, 0.59, 0.60, 5.5);
     
     std::string session_id = logger->getSessionId();
     std::filesystem::path fills_file = std::filesystem::path(test_dir) / session_id / "fills.csv";
@@ -167,8 +167,8 @@ TEST_F(TradingLoggerTest, MultipleOrders) {
     order2.price = 0.60;
     order2.size = 200.0;
     
-    logger->logOrderPlaced(order1, "MARKET_A");
-    logger->logOrderPlaced(order2, "MARKET_B");
+    logger->logOrderPlaced(order1, "MARKET_A", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    logger->logOrderPlaced(order2, "MARKET_B", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     
     std::string session_id = logger->getSessionId();
     std::filesystem::path orders_file = std::filesystem::path(test_dir) / session_id / "orders.csv";
@@ -187,7 +187,7 @@ TEST_F(TradingLoggerTest, EndSessionClosesFiles) {
     order.price = 0.55;
     order.size = 50.0;
     
-    logger->logOrderPlaced(order, "MARKET_END");
+    logger->logOrderPlaced(order, "MARKET_END", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     logger->endSession();
     
     // After end, files should be closed but data should still be there
@@ -208,7 +208,7 @@ TEST_F(TradingLoggerTest, NoSessionNoLogging) {
     order.size = 100.0;
     
     // Should not crash, just silently not log
-    logger->logOrderPlaced(order, "MARKET_X");
+    logger->logOrderPlaced(order, "MARKET_X", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     
     // No session directory should exist
     EXPECT_TRUE(std::filesystem::is_empty(test_dir) || 

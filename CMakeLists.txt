@@ -33,6 +33,7 @@ add_library(pmm_core
     src/network/websocket_client.cpp
     src/utils/state_persistence.cpp
     src/utils/trading_logger.cpp
+    src/utils/market_summary_logger.cpp
     src/utils/logger.cpp
 )
 
@@ -77,6 +78,10 @@ add_test(NAME StatePersistenceTest COMMAND test_state_persistence)
 add_executable(test_trading_logger tests/test_trading_logger.cpp)
 target_link_libraries(test_trading_logger PRIVATE pmm_core GTest::gtest_main)
 add_test(NAME TradingLoggerTest COMMAND test_trading_logger)
+
+add_executable(test_quote_ttl tests/test_quote_ttl.cpp)
+target_link_libraries(test_quote_ttl PRIVATE pmm_core GTest::gtest_main)
+add_test(NAME QuoteTTLTest COMMAND test_quote_ttl)
 
 add_executable(test_websocket tests/test_websocket.cpp)
 target_link_libraries(test_websocket PRIVATE pmm_core)

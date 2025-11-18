@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <mutex>
 #include <chrono>
+#include <unordered_map>
 
 namespace pmm {
 
@@ -17,17 +18,25 @@ public:
     void endSession();
     std::string getSessionId() const { return session_id_; }
 
-    void logOrderPlaced(const Order& order, const std::string& market_id);
+    void logOrderPlaced(const Order& order, const std::string& market_id,
+                       Price market_mid = 0.0, Price market_spread = 0.0, 
+                       Price best_bid = 0.0, Price best_ask = 0.0,
+                       Price our_bid = 0.0, Price our_ask = 0.0);
     void logOrderCancelled(const OrderId& order_id, const Order& order, const std::string& market_id);
     void logOrderFilled(const std::string& market_id, const OrderId& order_id, const TokenId& token_id, 
-                       Price fill_price, Size fill_size, Side side, double pnl = 0.0);
+                       Price fill_price, Size fill_size, Side side, double pnl = 0.0,
+                       Price quoted_price = 0.0, Price mid_at_fill = 0.0, 
+                       double seconds_to_fill = 0.0);
+    void updateFillAdverseSelection(const OrderId& order_id, Price mid_1s = 0.0, 
+                                   Price mid_5s = 0.0, Price mid_30s = 0.0);
 
     void logPosition(const std::string& market_id, const TokenId& token_id, Size position, Price avg_cost, 
                     const std::chrono::system_clock::time_point& opened_at, 
                     const std::chrono::system_clock::time_point& last_updated,
                     Side entry_side, int num_fills, double total_cost);
 
-    void logPriceUpdate(const std::string& market_id, const TokenId& token_id,
+    void logPriceUpdate(const std::string& market_name, const std::string& market_id, 
+                       const std::string& condition_id, const TokenId& token_id,
                        Price mid_price, double price_change_pct, double price_change_abs,
                        Price best_bid, Price best_ask, Price spread, double spread_bps,
                        double bid_volume, double ask_volume, double total_volume, double volume_imbalance,
@@ -45,6 +54,8 @@ private:
     std::ofstream fills_file_;
     std::ofstream positions_file_;
     std::ofstream price_updates_file_;
+    
+    std::unordered_map<OrderId, std::streampos> fill_positions_;
     
     std::mutex mutex_;
     

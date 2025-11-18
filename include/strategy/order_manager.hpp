@@ -47,7 +47,7 @@ private:
 
     std::unordered_map<OrderId, Order> orders_;
     uint64_t next_order_id_;
-    std::unordered_map<std::string, OrderBook> market_books_;
+    std::unordered_map<TokenId, OrderBook> market_books_;
 
     void checkForFills(const TokenId& token_id, const OrderBook& book);
     void generateFill(const OrderId& order_id, Price fill_price, Size fill_size);

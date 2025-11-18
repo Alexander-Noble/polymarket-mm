@@ -348,20 +348,61 @@ int main() {
     for (const auto& [event_idx, market_indices] : selected_markets) {
         const EventInfo& event = events[event_idx];
         
-        LOG_INFO("Event: {} ({} markets)", event.title, market_indices.size());
+        LOG_INFO("Event: {} ({} market{})", event.title, market_indices.size(), market_indices.size() > 1 ? "s" : "");
         
         for (size_t market_idx : market_indices) {
             const auto& market = event.markets[market_idx];
-            LOG_DEBUG("  - {}", market.question);
+            LOG_DEBUG("=== Selected Market: {} ===", market.question);
+            LOG_DEBUG("  Market ID: {}", market.market_id);
+            LOG_DEBUG("  Condition ID: {}", market.condition_id);
+            LOG_DEBUG("  Outcomes: {} (tokens: {})", market.outcomes.size(), market.tokens.size());
+            for (size_t i = 0; i < market.outcomes.size(); i++) {
+                LOG_DEBUG("    [{}] {} -> Token: {}", i, market.outcomes[i], market.tokens[i]);
+            }
             
-            for (size_t i = 0; i < market.tokens.size(); i++) {
+            // For binary markets, only trade the Yes side
+            if (market.tokens.size() == 2 && market.outcomes.size() == 2) {
+                // Find the Yes and No indices
+                size_t yes_idx = 0;
+                size_t no_idx = 1;
+                for (size_t i = 0; i < market.outcomes.size(); i++) {
+                    if (market.outcomes[i] == "Yes") {
+                        yes_idx = i;
+                        no_idx = 1 - i;  // The other outcome
+                        break;
+                    }
+                }
+                
+                // Register Yes side for trading
                 strategy.registerMarket(
-                    market.tokens[i],
+                    market.tokens[yes_idx],
                     market.question,
-                    market.outcomes[i],
-                    market.market_id
+                    market.outcomes[yes_idx],
+                    market.market_id,       // Specific market ID
+                    market.condition_id     // Groups related outcomes
                 );
-                all_tokens.push_back(market.tokens[i]);
+                all_tokens.push_back(market.tokens[yes_idx]);
+                
+                // Register No side metadata only (for logging, not trading)
+                strategy.registerMarketMetadata(
+                    market.tokens[no_idx],
+                    market.question,
+                    market.outcomes[no_idx],
+                    market.market_id,
+                    market.condition_id
+                );
+            } else {
+                // For non-binary markets, trade all outcomes
+                for (size_t i = 0; i < market.tokens.size(); i++) {
+                    strategy.registerMarket(
+                        market.tokens[i],
+                        market.question,
+                        market.outcomes[i],
+                        market.market_id,       // Specific market ID
+                        market.condition_id     // Groups related outcomes
+                    );
+                    all_tokens.push_back(market.tokens[i]);
+                }
             }
             total_markets++;
         }
@@ -369,7 +410,9 @@ int main() {
 
     LOG_INFO("Total markets registered: {} ({} tokens total)", total_markets, all_tokens.size());
     
-    // Set event end times for all registered markets
+    // Parse and store event end times
+    std::map<size_t, std::chrono::system_clock::time_point> event_end_times;
+    
     for (const auto& [event_idx, market_indices] : selected_markets) {
         const EventInfo& event = events[event_idx];
         
@@ -380,20 +423,8 @@ int main() {
             ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
             
             if (!ss.fail()) {
-                auto end_time = std::chrono::system_clock::from_time_t(std::mktime(&tm));
-                
-                // Get all unique market_ids for this event
-                std::set<std::string> market_ids;
-                for (size_t market_idx : market_indices) {
-                    market_ids.insert(event.markets[market_idx].market_id);
-                }
-                
-                // Set the end time for each market
-                for (const std::string& market_id : market_ids) {
-                    strategy.setEventEndTime(market_id, end_time);
-                }
-                
-                LOG_DEBUG("Set event end time for '{}': {}", event.title, event.end_date);
+                event_end_times[event_idx] = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+                LOG_DEBUG("Parsed event end time for '{}': {}", event.title, event.end_date);
             } else {
                 LOG_WARN("Failed to parse end_date for event: {}", event.title);
             }
@@ -406,6 +437,25 @@ int main() {
         ? events[selected_markets.begin()->first].title 
         : "Multi-Market Trading";
     strategy.startLogging(session_title);
+    
+    // Set event end times AFTER logging is started (so market_summary_logger exists)
+    for (const auto& [event_idx, market_indices] : selected_markets) {
+        const EventInfo& event = events[event_idx];
+        
+        auto end_time_it = event_end_times.find(event_idx);
+        if (end_time_it != event_end_times.end()) {
+            // Get all unique condition_ids for this event
+            std::set<std::string> condition_ids;
+            for (size_t market_idx : market_indices) {
+                condition_ids.insert(event.markets[market_idx].condition_id);
+            }
+            
+            // Set the end time for each condition
+            for (const std::string& condition_id : condition_ids) {
+                strategy.setEventEndTime(condition_id, end_time_it->second);
+            }
+        }
+    }
 
     LOG_INFO("Connecting to Polymarket WebSocket...");
     PolymarketWebSocketClient ws_client(queue);
@@ -471,7 +521,7 @@ int main() {
                     pnl_str = pnl_buf;
                 }
                 
-                // Format spread in basis points
+                // Format spread in basis points (avg_spread is already a percentage)
                 double avg_spread_bps = (avg_spread > 0) ? (avg_spread * 10000) : 0.0;
                 char spread_buf[16];
                 snprintf(spread_buf, sizeof(spread_buf), "%.1fbps", avg_spread_bps);

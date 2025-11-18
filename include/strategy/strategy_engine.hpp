@@ -8,6 +8,7 @@
 #include "strategy/adverse_selection.hpp"
 #include "utils/state_persistence.hpp"
 #include "utils/trading_logger.hpp"
+#include "utils/market_summary_logger.hpp"
 
 #include <map>
 #include <atomic>
@@ -31,9 +32,16 @@ public:
     void registerMarket(const TokenId& token_id, 
                     const std::string& title,
                     const std::string& outcome,
-                    const std::string& market_id);
+                    const std::string& market_id,
+                    const std::string& condition_id);
     
-    void setEventEndTime(const std::string& market_id, 
+    void registerMarketMetadata(const TokenId& token_id,
+                                const std::string& title,
+                                const std::string& outcome,
+                                const std::string& market_id,
+                                const std::string& condition_id);
+    
+    void setEventEndTime(const std::string& condition_id, 
                         const std::chrono::system_clock::time_point& end_time);
 
     size_t getPositionCount() const;
@@ -43,9 +51,9 @@ public:
     size_t getActiveMarketCount() const;
     double getTotalPnL() const;
     double getUnrealizedPnL() const;
-    double getTotalInventory() const;  // Absolute sum of all positions
-    double getAverageSpread() const;    // Average spread across all active markets
-    size_t getFillCount() const;        // Total fills since start
+    double getTotalInventory() const;
+    double getAverageSpread() const;
+    size_t getFillCount() const;
 
     void startLogging(const std::string& event_name);
     void logInitialPositions();
@@ -76,7 +84,6 @@ private:
         double inventory_before;
         double inventory_after;
         
-        // To be populated later
         Price mid_30s_after = 0.0;
         Price mid_60s_after = 0.0;
         bool metrics_complete = false;
@@ -90,6 +97,20 @@ private:
         double spread_bps;
         double inventory;
         std::chrono::steady_clock::time_point last_update;
+        std::chrono::steady_clock::time_point quote_created_at;
+        int ttl_seconds;
+        
+        bool isExpired() const {
+            auto now = std::chrono::steady_clock::now();
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - quote_created_at);
+            return age.count() >= ttl_seconds;
+        }
+        
+        int getSecondsUntilExpiry() const {
+            auto now = std::chrono::steady_clock::now();
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(now - quote_created_at);
+            return std::max(0, ttl_seconds - static_cast<int>(age.count()));
+        }
     };
 
     struct PriceUpdateHistory {
@@ -102,6 +123,7 @@ private:
     EventQueue& event_queue_;
     std::unique_ptr<StatePersistence> state_persistence_;
     std::unique_ptr<TradingLogger> trading_logger_;
+    std::unique_ptr<MarketSummaryLogger> market_summary_logger_;
     std::unique_ptr<AdverseSelectionManager> as_manager_;
     OrderManager order_manager_;
     std::atomic<bool> running_;
@@ -114,23 +136,21 @@ private:
     std::unordered_map<TokenId, Position> positions_;
     mutable std::mutex positions_mutex_;
 
-    // Fill metrics tracking
     std::vector<FillMetrics> fill_history_;
     std::mutex fill_metrics_mutex_;
     std::atomic<size_t> total_fills_{0};
     std::atomic<bool> initial_positions_logged_{false};
 
-    // Quote tracking for summary
     std::unordered_map<TokenId, QuoteSummary> active_quotes_;
     std::mutex quotes_mutex_;
 
-    // Price update history for tracking changes
     std::unordered_map<TokenId, PriceUpdateHistory> price_history_;
     std::mutex price_history_mutex_;
 
     void run();
     void checkPendingFillMetrics();
     void logQuoteSummary();
+    void checkExpiredQuotes();
     
     void handleBookSnapshot(const Event& event);
     void handlePriceUpdate(const Event& event);

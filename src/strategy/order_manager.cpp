@@ -41,7 +41,41 @@ OrderId OrderManager::placeOrder(const TokenId& token_id, Side side, Price price
     orders_[order_id] = order;
 
     if (trading_logger_) {
-        trading_logger_->logOrderPlaced(order, market_id);
+        // Get market context if available
+        Price market_mid = 0.0;
+        Price market_spread = 0.0;
+        Price best_bid = 0.0;
+        Price best_ask = 0.0;
+        Price our_bid = 0.0;
+        Price our_ask = 0.0;
+        
+        auto book_it = market_books_.find(token_id);
+        if (book_it != market_books_.end()) {
+            const auto& book = book_it->second;
+            market_mid = book.getMid();
+            market_spread = book.getSpread();
+            best_bid = book.getBestBid();
+            best_ask = book.getBestAsk();
+        }
+        
+        // Find our paired orders for this token to calculate our spread
+        for (const auto& [oid, o] : orders_) {
+            if (o.token_id == token_id && o.status == OrderStatus::OPEN) {
+                if (o.side == Side::BUY) {
+                    our_bid = std::max(our_bid, o.price);
+                } else {
+                    our_ask = (our_ask == 0.0) ? o.price : std::min(our_ask, o.price);
+                }
+            }
+        }
+        // Include the current order being placed
+        if (order.side == Side::BUY) {
+            our_bid = std::max(our_bid, order.price);
+        } else {
+            our_ask = (our_ask == 0.0) ? order.price : std::min(our_ask, order.price);
+        }
+        
+        trading_logger_->logOrderPlaced(order, market_id, market_mid, market_spread, best_bid, best_ask, our_bid, our_ask);
     }
 
     if (trading_mode_ == TradingMode::PAPER) {

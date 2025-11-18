@@ -25,7 +25,7 @@ protected:
 
 TEST_F(StrategyEngineTest, RegisterMarket) {
     std::string token = "test_token_123";
-    strategy->registerMarket(token, "Test Event", "Test Market", "12345");
+    strategy->registerMarket(token, "Test Event", "Test Market", "12345", "condition_123");
     
     SUCCEED();
 }
@@ -40,7 +40,7 @@ TEST_F(StrategyEngineTest, StartAndStop) {
 
 TEST_F(StrategyEngineTest, ProcessBookSnapshot) {
     std::string token = "test_token_123";
-    strategy->registerMarket(token, "Test Event", "Test Market", "12345");
+    strategy->registerMarket(token, "Test Event", "Test Market", "12345", "condition_123");
     strategy->start();
     
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -57,7 +57,7 @@ TEST_F(StrategyEngineTest, ProcessBookSnapshot) {
 TEST_F(StrategyEngineTest, PaperTradingSimulation) {
     std::string villa_token = "44623110248227182263524920709598432835467185438698898378400926229226251167932";
     
-    strategy->registerMarket(villa_token, "Aston Villa vs Bournemouth", "Villa Win", "651006");
+    strategy->registerMarket(villa_token, "Aston Villa vs Bournemouth", "Villa Win", "651006", "condition_001");
     strategy->start();
     
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
